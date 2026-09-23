@@ -1,0 +1,19 @@
+{
+  "version": "2026-09-23",
+  "policies": [
+    {
+      "id": "POLICY-BANNED-LEGACY",
+      "ecosystem": "maven",
+      "name": "com.legacy:deprecated-lib",
+      "range": null,
+      "message": "legacy deprecated library is banned at all versions"
+    },
+    {
+      "id": "POLICY-LODASH-PRERELEASE",
+      "ecosystem": "npm",
+      "name": "lodash",
+      "range": "<1.0.0",
+      "message": "lodash versions below 1.0.0 are forbidden by org policy"
+    }
+  ]
+}
