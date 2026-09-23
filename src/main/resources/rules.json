@@ -1,0 +1,52 @@
+{
+  "vulnerabilities": [
+    {
+      "id": "LOCAL-CVE-2024-0001",
+      "ecosystem": "npm",
+      "name": "lodash",
+      "range": ">=4.0.0 <4.17.21",
+      "severity": "HIGH"
+    },
+    {
+      "id": "LOCAL-CVE-2024-0002",
+      "ecosystem": "npm",
+      "name": "minimist",
+      "range": "<0.2.1 || >1.0.0 <1.2.6",
+      "severity": "CRITICAL"
+    },
+    {
+      "id": "LOCAL-CVE-2023-0010",
+      "ecosystem": "maven",
+      "name": "org.apache.logging.log4j:log4j-core",
+      "range": ">=2.0.0 <2.17.1",
+      "severity": "CRITICAL"
+    },
+    {
+      "id": "LOCAL-CVE-2022-0099",
+      "ecosystem": "pypi",
+      "name": "requests",
+      "range": "~2.5.0",
+      "severity": "MEDIUM"
+    }
+  ],
+  "policies": [
+    {
+      "id": "LOCAL-POLICY-BAN-0001",
+      "type": "BAN",
+      "ecosystem": "npm",
+      "name": "left-pad",
+      "range": "*",
+      "license": null,
+      "severity": "HIGH"
+    },
+    {
+      "id": "LOCAL-POLICY-LIC-0001",
+      "type": "LICENSE_DENY",
+      "ecosystem": null,
+      "name": null,
+      "range": "*",
+      "license": "GPL-3.0-only",
+      "severity": "HIGH"
+    }
+  ]
+}
