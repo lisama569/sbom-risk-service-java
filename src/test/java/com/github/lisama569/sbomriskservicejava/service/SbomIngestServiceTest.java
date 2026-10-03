@@ -181,4 +181,73 @@ class SbomIngestServiceTest {
                 threads, repository.findByTarget("t-concurrent-distinct").size());
         assertEquals(threads, repository.findByTarget("t-concurrent-distinct").size());
     }
+
+    @Test
+    @DisplayName("并发等价坐标写法：同一目标并发提交 purl 与 名字 两种写法，最终仅 1 条记录")
+    void concurrentEquivalentSpellingsRemainIdempotent() throws InterruptedException {
+        String viaPurl = """
+                {"bomFormat":"CycloneDX","components":[
+                  {"name":"log4j-core","version":"2.14.0",
+                   "purl":"pkg:maven/org.apache.logging.log4j/log4j-core@2.14.0"}]}
+                """;
+        String viaName = """
+                {"bomFormat":"CycloneDX","components":[
+                  {"name":"org.apache.logging.log4j:log4j-core","version":"2.14.0",
+                   "ecosystems":["maven"]}]}
+                """;
+        int threads = 16;
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+        CountDownLatch start = new CountDownLatch(1);
+        AtomicInteger accepted = new AtomicInteger();
+        AtomicInteger duplicate = new AtomicInteger();
+        for (int i = 0; i < threads; i++) {
+            final String doc = (i % 2 == 0) ? viaPurl : viaName;
+            pool.submit(() -> {
+                try {
+                    start.await();
+                    IngestionResponse r = service.ingest("t-equiv-race", doc);
+                    accepted.addAndGet(r.acceptedCount());
+                    duplicate.addAndGet(r.duplicateCount());
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            });
+        }
+        start.countDown();
+        pool.shutdown();
+        assertTrue(pool.awaitTermination(10, TimeUnit.SECONDS));
+        log.info("并发等价写法输入摘要: {} 个线程交替提交 purl/名字 两种写法 | 汇总 accepted={}, duplicate={}, 存储={}",
+                threads, accepted.get(), duplicate.get(),
+                repository.findByTarget("t-equiv-race").size());
+        assertEquals(1, accepted.get(), "等价写法归一到同一身份，恰好一个请求写入");
+        assertEquals(threads - 1, duplicate.get(), "其余请求全部幂等命中");
+        assertEquals(1, repository.findByTarget("t-equiv-race").size());
+        assertEquals("maven::org.apache.logging.log4j:log4j-core@2.14.0",
+                repository.findByTarget("t-equiv-race").get(0).key());
+    }
+
+    @Test
+    @DisplayName("大清单重复提交：500 个组件两次提交，第二次全部幂等命中，存储条数不变")
+    void largeManifestResubmissionIsIdempotent() {
+        StringBuilder sb = new StringBuilder("{\"bomFormat\":\"CycloneDX\",\"components\":[");
+        for (int i = 0; i < 500; i++) {
+            if (i > 0) {
+                sb.append(',');
+            }
+            sb.append("{\"name\":\"lib-").append(i).append("\",\"version\":\"1.0.0\",")
+                    .append("\"purl\":\"pkg:npm/lib-").append(i).append("@1.0.0\"}");
+        }
+        sb.append("]}");
+        String doc = sb.toString();
+        IngestionResponse first = service.ingest("t-large", doc);
+        IngestionResponse second = service.ingest("t-large", doc);
+        log.info("大清单输入摘要: 500 个 npm 坐标组件提交两次 | 首次 accepted={} | 二次 accepted={} duplicate={} | 存储={}",
+                first.acceptedCount(), second.acceptedCount(), second.duplicateCount(),
+                repository.findByTarget("t-large").size());
+        assertEquals(500, first.acceptedCount());
+        assertEquals(0, second.acceptedCount());
+        assertEquals(500, second.duplicateCount());
+        assertEquals(IngestionStatus.SUCCESS, second.status());
+        assertEquals(500, repository.findByTarget("t-large").size());
+    }
 }

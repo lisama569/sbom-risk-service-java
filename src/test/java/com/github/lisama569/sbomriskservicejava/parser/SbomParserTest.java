@@ -90,6 +90,77 @@ class SbomParserTest {
     }
 
     @Test
+    @DisplayName("坐标身份归一：purl 与 名字+ecosystems 的等价写法得到同一组件键")
+    void purlAndNameSpellingsNormalizeToSameIdentity() {
+        String viaPurl = """
+                {"bomFormat":"CycloneDX","components":[
+                  {"name":"log4j-core","version":"2.14.0",
+                   "purl":"pkg:maven/org.apache.logging.log4j/log4j-core@2.14.0"}]}
+                """;
+        String viaName = """
+                {"bomFormat":"CycloneDX","components":[
+                  {"name":"org.apache.logging.log4j:log4j-core","version":"2.14.0",
+                   "ecosystems":["maven"]}]}
+                """;
+        var a = cdxParser.parse(viaPurl).components().get(0);
+        var b = cdxParser.parse(viaName).components().get(0);
+        log.info("输入摘要: 同一库两种等价写法 | purl 写法键={} | 名字写法键={}", a.key(), b.key());
+        assertEquals(b.key(), a.key());
+        assertEquals("maven", a.ecosystem());
+        assertEquals("org.apache.logging.log4j:log4j-core", a.name());
+    }
+
+    @Test
+    @DisplayName("npm 作用域：purl %40 编码与名字字段 @scope 写法归一到同一身份")
+    void npmScopeNormalizesAcrossSpellings() {
+        String viaPurl = """
+                {"bomFormat":"CycloneDX","components":[
+                  {"name":"core","version":"15.0.0","purl":"pkg:npm/%40angular/core@15.0.0"}]}
+                """;
+        String viaName = """
+                {"bomFormat":"CycloneDX","components":[
+                  {"name":"@angular/core","version":"15.0.0","ecosystems":["npm"]}]}
+                """;
+        var a = cdxParser.parse(viaPurl).components().get(0);
+        var b = cdxParser.parse(viaName).components().get(0);
+        log.info("输入摘要: npm 作用域两种写法 | purl 键={} | 名字键={}", a.key(), b.key());
+        assertEquals(b.key(), a.key());
+    }
+
+    @Test
+    @DisplayName("条目版本缺失时回退坐标版本；不支持的坐标类型被明确拒绝且原因可区分")
+    void versionFallsBackToPurlAndUnsupportedTypeRejected() {
+        String doc = """
+                {"bomFormat":"CycloneDX","components":[
+                  {"name":"lodash","purl":"pkg:npm/lodash@4.17.20"},
+                  {"name":"requests","version":"2.31.0","purl":"pkg:pypi/requests@2.31.0"}
+                ]}
+                """;
+        ParseResult r = cdxParser.parse(doc);
+        log.info("输入摘要: 1 条版本取自 purl + 1 条 pypi 坐标 | 接受={} 拒绝={} 拒绝原因={}",
+                r.components().size(), r.rejected().size(),
+                r.rejected().stream().map(x -> x.reason().name()).toList());
+        assertEquals(1, r.components().size());
+        assertEquals("npm::lodash@4.17.20", r.components().get(0).key());
+        assertEquals(1, r.rejected().size());
+        assertEquals(RejectReason.UNSUPPORTED_PURL_TYPE, r.rejected().get(0).reason());
+        assertEquals(1, r.rejected().get(0).index());
+    }
+
+    @Test
+    @DisplayName("畸形 purl：回退字段法，生态归 unknown（判定层将落入 UNKNOWN，不默认安全）")
+    void malformedPurlFallsBackToUnknownEcosystem() {
+        String doc = """
+                {"bomFormat":"CycloneDX","components":[
+                  {"name":"some-lib","version":"1.0.0","purl":"not-a-purl"}]}
+                """;
+        ParseResult r = cdxParser.parse(doc);
+        log.info("输入摘要: 畸形 purl 条目 | 归一组件键={}", r.components().get(0).key());
+        assertEquals(1, r.components().size());
+        assertEquals("unknown", r.components().get(0).ecosystem());
+    }
+
+    @Test
     @DisplayName("畸形文档分类：非法 JSON / 空内容 / 缺数组 / 数组类型错误 / 根非对象")
     void malformedDocumentsAreRejectedAtDocumentLevel() {
         assertDocumentFailure("not json at all", "非法 JSON");

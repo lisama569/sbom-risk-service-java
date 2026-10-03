@@ -25,8 +25,8 @@ import java.util.List;
  *   <li>策略（拒绝名单）命中 → {@link RiskLevel#DENIED}；</li>
  *   <li>漏洞范围命中 → {@link RiskLevel#VULNERABLE}；</li>
  *   <li>无任何规则匹配 → {@link RiskLevel#CLEAN}；</li>
- *   <li>版本不可解析、规则范围非法等无法判定的情况 → {@link RiskLevel#UNKNOWN}，
- *       绝不能默认安全。</li>
+ *   <li>版本不可解析、生态无法识别（规则库未覆盖）、规则范围非法等无法判定的情况
+ *       → {@link RiskLevel#UNKNOWN}，绝不能默认安全。</li>
  * </ol>
  * 报告携带规则版本；规则不变时，同一组件集合的报告逐条可复现。
  */
@@ -34,6 +34,12 @@ import java.util.List;
 public class RiskEvaluationService {
 
     private static final Logger log = LoggerFactory.getLogger(RiskEvaluationService.class);
+
+    /**
+     * 规则库覆盖、可给出确定结论的生态。生态不在此集合（含 unknown）的组件
+     * 无法确认是否命中规则，结论至少为 {@link RiskLevel#UNKNOWN}，绝不默认安全。
+     */
+    private static final java.util.Set<String> JUDGEABLE_ECOSYSTEMS = java.util.Set.of("maven", "npm");
 
     private final ComponentRepository componentRepository;
     private final RuleRepository ruleRepository;
@@ -87,6 +93,16 @@ public class RiskEvaluationService {
 
         List<String> reasons = new ArrayList<>();
 
+        // 0. 生态不可识别 → 无法确认规则覆盖，先记无法判定（规则仍照常匹配，
+        //    命中的 DENIED/VULNERABLE 更严重等级仍然优先）
+        boolean unjudgeable = false;
+        String ecosystem = component.ecosystem() == null
+                ? "unknown" : component.ecosystem().trim().toLowerCase();
+        if (!JUDGEABLE_ECOSYSTEMS.contains(ecosystem)) {
+            unjudgeable = true;
+            reasons.add("UNKNOWN:unrecognized-ecosystem:" + ecosystem);
+        }
+
         // 1. 策略优先（DENIED）
         List<PolicyRule> policies = ruleRepository.findPolicies(component);
         boolean denied = false;
@@ -97,6 +113,7 @@ public class RiskEvaluationService {
                     reasons.add("DENIED:" + policy.id() + ":" + policy.message());
                 }
             } catch (VersionRangeException e) {
+                unjudgeable = true;
                 reasons.add("UNKNOWN:illegal-policy-range:" + policy.id() + ":" + e.getMessage());
             }
         }
@@ -107,7 +124,6 @@ public class RiskEvaluationService {
         // 2. 漏洞（VULNERABLE）
         List<VulnerabilityRule> vulns = ruleRepository.findVulnerabilities(component);
         boolean vulnerable = false;
-        boolean unjudgeable = reasons.stream().anyMatch(r -> r.startsWith("UNKNOWN:"));
         for (VulnerabilityRule vuln : vulns) {
             try {
                 if (ruleRepository.rangeMatches(vuln, version)) {

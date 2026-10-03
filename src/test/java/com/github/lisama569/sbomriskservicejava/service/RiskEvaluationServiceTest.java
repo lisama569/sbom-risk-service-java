@@ -103,13 +103,58 @@ class RiskEvaluationServiceTest {
     }
 
     @Test
-    @DisplayName("无规则组件为 CLEAN 且有明确依据，而非缺省")
+    @DisplayName("无规则组件为 CLEAN 且有明确依据，而非缺省（前提：生态可判定）")
     void cleanHasExplicitReason() {
-        ingest.ingest("t3", docUnknownEco("totally:unknown-lib", "1.0.0"));
+        ingest.ingest("t3", doc("com.example:totally-unknown-lib", "1.0.0", "maven"));
         ComponentRisk cr = risk.evaluate("t3").components().get(0);
-        log.info("输入摘要: 无任何规则匹配的组件 | 判定: {} | 依据: {}", cr.level(), cr.reasons());
+        log.info("输入摘要: maven 生态但无任何规则匹配的组件 | 判定: {} | 依据: {}", cr.level(), cr.reasons());
         assertEquals(RiskLevel.CLEAN, cr.level());
         assertEquals("CLEAN:no-rules-matched", cr.reasons().get(0));
+    }
+
+    @Test
+    @DisplayName("生态无法识别的组件不归为安全：结论 UNKNOWN 且总体等级随之抬升")
+    void unrecognizedEcosystemYieldsUnknownNotClean() {
+        // 一个可判定且无规则命中的 maven 组件 + 一个生态未知的组件
+        ingest.ingest("t-unknown-eco", doc("com.example:known-lib", "1.0.0", "maven"));
+        ingest.ingest("t-unknown-eco", docUnknownEco("mystery-lib", "1.0.0"));
+        RiskReport report = risk.evaluate("t-unknown-eco");
+        ComponentRisk known = find(report, "known-lib");
+        ComponentRisk mystery = find(report, "mystery-lib");
+        log.info("输入摘要: 1 个 maven 可判定组件 + 1 个生态未知组件 | maven 判定={} | 未知生态判定={} 依据={}",
+                known.level(), mystery.level(), mystery.reasons());
+        assertEquals(RiskLevel.CLEAN, known.level());
+        assertEquals(RiskLevel.UNKNOWN, mystery.level());
+        assertTrueReasonStartsWith(mystery, "UNKNOWN:unrecognized-ecosystem:unknown");
+        // 总体结论：UNKNOWN 比 CLEAN 更需要关注
+        assertEquals(RiskLevel.UNKNOWN, report.overallLevel());
+    }
+
+    @Test
+    @DisplayName("跨生态隔离：npm 规则不会命中 maven 同名构件，maven 规则也不会命中 npm 包")
+    void crossEcosystemRulesDoNotBleed() {
+        // npm lodash 命中 npm 规则；maven 坐标 lodash:lodash 与 npm 的 lodash 是不同身份
+        ingest.ingest("t-iso", """
+                {"bomFormat":"CycloneDX","components":[
+                  {"name":"lodash","version":"4.17.20","purl":"pkg:npm/lodash@4.17.20"},
+                  {"name":"lodash","version":"4.17.20","purl":"pkg:maven/lodash/lodash@4.17.20"},
+                  {"name":"spring-beans","version":"5.3.16","ecosystems":["npm"]}
+                ]}
+                """);
+        RiskReport report = risk.evaluate("t-iso");
+        ComponentRisk npmLodash = find(report, "npm::lodash@");
+        ComponentRisk mavenLodash = find(report, "maven::lodash:lodash@");
+        ComponentRisk npmSpring = find(report, "npm::spring-beans@");
+        log.info("输入摘要: npm lodash / maven lodash:lodash / npm spring-beans 同名跨生态 | "
+                        + "判定: npm lodash={} maven lodash={} npm spring-beans={}",
+                npmLodash.level(), mavenLodash.level(), npmSpring.level());
+        report.components().forEach(c -> log.info("判定依据: {} => {} ({})",
+                c.component(), c.level(), c.reasons()));
+        assertEquals(RiskLevel.VULNERABLE, npmLodash.level());
+        // maven 生态可判定、无 maven 规则命中 => CLEAN，绝不串 npm 的 CVE
+        assertEquals(RiskLevel.CLEAN, mavenLodash.level());
+        // npm 生态下名叫 spring-beans 的包不命中 maven 的 spring-beans 规则
+        assertEquals(RiskLevel.CLEAN, npmSpring.level());
     }
 
     @Test
