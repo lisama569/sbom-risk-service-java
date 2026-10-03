@@ -105,7 +105,7 @@ class RiskEvaluationServiceTest {
     @Test
     @DisplayName("无规则组件为 CLEAN 且有明确依据，而非缺省")
     void cleanHasExplicitReason() {
-        ingest.ingest("t3", docUnknownEco("totally:unknown-lib", "1.0.0"));
+        ingest.ingest("t3", doc("totally:unknown-lib", "1.0.0", "maven"));
         ComponentRisk cr = risk.evaluate("t3").components().get(0);
         log.info("输入摘要: 无任何规则匹配的组件 | 判定: {} | 依据: {}", cr.level(), cr.reasons());
         assertEquals(RiskLevel.CLEAN, cr.level());
@@ -117,9 +117,9 @@ class RiskEvaluationServiceTest {
     void illegalRangeYieldsUnknownNotClean() {
         rules.replace("test-bad-range-1",
                 List.of(),
-                List.of(new PolicyRule("POL-BAD", "unknown", "shady-lib",
+                List.of(new PolicyRule("POL-BAD", "maven", "shady-lib",
                         ">=not-a-version", "bad range")));
-        ingest.ingest("t4", doc("shady-lib", "1.0.0", "unknown"));
+        ingest.ingest("t4", doc("shady-lib", "1.0.0", "maven"));
         ComponentRisk cr = risk.evaluate("t4").components().get(0);
         log.info("输入摘要: 命中组件但策略区间非法 | 判定: {} | 依据: {}", cr.level(), cr.reasons());
         assertEquals(RiskLevel.UNKNOWN, cr.level());
@@ -141,7 +141,7 @@ class RiskEvaluationServiceTest {
     @Test
     @DisplayName("可复现：相同输入与规则版本，两次判定逐字段一致；规则更新后结论相应变化")
     void verdictsAreReproducibleAndReactToRuleUpdates() {
-        ingest.ingest("t5", doc("tracked-lib", "1.0.0", "unknown"));
+        ingest.ingest("t5", doc("tracked-lib", "1.0.0", "maven"));
         RiskReport r1 = risk.evaluate("t5");
         RiskReport r2 = risk.evaluate("t5");
         assertEquals(r1.components(), r2.components());
@@ -150,7 +150,7 @@ class RiskEvaluationServiceTest {
 
         // 规则原子更新后，同一输入结论变为可复现的新结论
         rules.replace("2026-09-24",
-                List.of(new VulnerabilityRule("CVE-NEW", "unknown", "tracked-lib",
+                List.of(new VulnerabilityRule("CVE-NEW", "maven", "tracked-lib",
                         List.of("=1.0.0"))),
                 List.of());
         RiskReport r3 = risk.evaluate("t5");
@@ -165,6 +165,46 @@ class RiskEvaluationServiceTest {
     @DisplayName("目标不存在抛 TargetNotFoundException（由 Web 层映射为 404）")
     void unknownTargetIsRejected() {
         assertThrows(TargetNotFoundException.class, () -> risk.evaluate("no-such-target"));
+    }
+
+    @Test
+    @DisplayName("无法判定兜底：无生态坐标的组件结论 UNKNOWN 且依据明确，绝不默认安全")
+    void unidentifiedComponentYieldsUnknown() {
+        ingest.ingest("t-unidentified", docUnknownEco("casual-name-only", "1.0.0"));
+        RiskReport report = risk.evaluate("t-unidentified");
+        ComponentRisk cr = report.components().get(0);
+        log.info("输入摘要: 仅随意名字、无生态无坐标 | 判定: {} | 依据: {}", cr.level(), cr.reasons());
+        assertEquals(RiskLevel.UNKNOWN, cr.level());
+        assertTrueReasonStartsWith(cr, "UNKNOWN:unidentified-component:");
+        assertEquals(RiskLevel.UNKNOWN, report.overallLevel());
+    }
+
+    @Test
+    @DisplayName("无法判定兜底：不支持的生态（deb 坐标）即使名字与规则相同也不命中，结论 UNKNOWN")
+    void unsupportedEcosystemYieldsUnknownAndNeverMatchesRules() {
+        // npm 规则库中有 lodash <4.17.21 的 CVE；deb 的同名包绝不能串号命中
+        String doc = "{\"bomFormat\":\"CycloneDX\",\"components\":[{"
+                + "\"version\":\"4.17.20\",\"purl\":\"pkg:deb/debian/lodash@4.17.20\"}]}";
+        ingest.ingest("t-deb-eco", doc);
+        ComponentRisk cr = risk.evaluate("t-deb-eco").components().get(0);
+        log.info("输入摘要: deb 生态 lodash 4.17.20（npm 有同名 CVE 规则）| 判定: {} | 依据: {}",
+                cr.level(), cr.reasons());
+        assertEquals(RiskLevel.UNKNOWN, cr.level());
+        assertTrueReasonStartsWith(cr, "UNKNOWN:unsupported-ecosystem:deb");
+    }
+
+    @Test
+    @DisplayName("总体结论：UNKNOWN 压过 CLEAN，目标含无法判定组件时总体不得为安全")
+    void unknownOutranksCleanInOverall() {
+        ingest.ingest("t-mixed", doc("org.apache.logging.log4j:log4j-core", "2.20.0", "maven"));
+        ingest.ingest("t-mixed", docUnknownEco("mystery-lib", "1.0.0"));
+        RiskReport report = risk.evaluate("t-mixed");
+        report.components().forEach(c -> log.info("判定依据: {} => {} ({})",
+                c.component(), c.level(), c.reasons()));
+        assertEquals(RiskLevel.CLEAN, find(report, "log4j-core").level());
+        assertEquals(RiskLevel.UNKNOWN, find(report, "mystery-lib").level());
+        assertEquals(RiskLevel.UNKNOWN, report.overallLevel());
+        log.info("总体结论: {}（UNKNOWN 优先于 CLEAN 体现）", report.overallLevel());
     }
 
     private static void assertTrueReasonStartsWith(ComponentRisk cr, String prefix) {

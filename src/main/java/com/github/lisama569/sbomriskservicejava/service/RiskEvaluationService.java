@@ -2,6 +2,7 @@ package com.github.lisama569.sbomriskservicejava.service;
 
 import com.github.lisama569.sbomriskservicejava.model.Component;
 import com.github.lisama569.sbomriskservicejava.model.ComponentRisk;
+import com.github.lisama569.sbomriskservicejava.model.Ecosystems;
 import com.github.lisama569.sbomriskservicejava.model.PolicyRule;
 import com.github.lisama569.sbomriskservicejava.model.RiskLevel;
 import com.github.lisama569.sbomriskservicejava.model.RiskReport;
@@ -22,12 +23,15 @@ import java.util.List;
  * 风险判定服务。
  * <p>对目标下每个已接受组件，按当前规则快照判定：
  * <ol>
+ *   <li>生态认不出来或不受支持（身份不可靠）→ {@link RiskLevel#UNKNOWN}，
+ *       不参与规则匹配，绝不默认安全；</li>
  *   <li>策略（拒绝名单）命中 → {@link RiskLevel#DENIED}；</li>
  *   <li>漏洞范围命中 → {@link RiskLevel#VULNERABLE}；</li>
  *   <li>无任何规则匹配 → {@link RiskLevel#CLEAN}；</li>
  *   <li>版本不可解析、规则范围非法等无法判定的情况 → {@link RiskLevel#UNKNOWN}，
  *       绝不能默认安全。</li>
  * </ol>
+ * 总体等级取最严重者，因此 UNKNOWN 会压过 CLEAN 体现在目标总体结论中。
  * 报告携带规则版本；规则不变时，同一组件集合的报告逐条可复现。
  */
 @Service
@@ -76,6 +80,16 @@ public class RiskEvaluationService {
     }
 
     private ComponentRisk evaluateOne(Component component) {
+        // 0. 身份可靠性闸门：生态认不出来（unknown）或生态不受支持的组件，
+        //    无法与规则库建立可信匹配，一律“无法判定”，绝不默认安全
+        String ecosystem = component.ecosystem();
+        if (!Ecosystems.isSupported(ecosystem)) {
+            String reason = Ecosystems.UNKNOWN.equals(Ecosystems.normalize(ecosystem))
+                    ? "UNKNOWN:unidentified-component:no-ecosystem-or-coordinates"
+                    : "UNKNOWN:unsupported-ecosystem:" + Ecosystems.normalize(ecosystem);
+            return new ComponentRisk(component.key(), RiskLevel.UNKNOWN, List.of(reason));
+        }
+
         SemVer version;
         try {
             version = SemVer.parse(component.version());

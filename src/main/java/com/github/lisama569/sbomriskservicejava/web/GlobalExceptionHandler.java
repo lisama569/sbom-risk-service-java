@@ -15,7 +15,8 @@ import org.springframework.web.bind.annotation.RestControllerAdvice;
  *   <li>目标不存在 → 404；</li>
  *   <li>其余未预期异常 → 500。</li>
  * </ul>
- * 注意：清单条目级失败不会走这里，而是在 200 响应体中以 PARTIAL_SUCCESS 表达。
+ * 注意：清单条目级失败不会走这里，而是以 207（部分成功）/ 422（整体失败）响应体中的
+ * status 与 rejected[] 表达。
  */
 @RestControllerAdvice
 public class GlobalExceptionHandler {

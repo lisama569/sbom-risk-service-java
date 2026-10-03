@@ -18,6 +18,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -89,7 +90,7 @@ class SbomControllerIntegrationTest {
     }
 
     @Test
-    @DisplayName("部分成功：HTTP 200 + PARTIAL_SUCCESS，拒绝原因逐条可区分")
+    @DisplayName("部分成功：HTTP 207 + PARTIAL_SUCCESS，拒绝原因逐条可区分")
     void partialSuccessReturnedWithDistinguishableReasons() throws Exception {
         String doc = "{\"bomFormat\":\"CycloneDX\",\"components\":["
                 + "{\"name\":\"ok\",\"version\":\"1.0.0\"},"
@@ -98,26 +99,26 @@ class SbomControllerIntegrationTest {
         mockMvc.perform(post("/api/sbom/ingest")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(request("http-partial", null, doc)))
-                .andExpect(status().isOk())
+                .andExpect(status().isMultiStatus())
                 .andExpect(jsonPath("$.status").value("PARTIAL_SUCCESS"))
                 .andExpect(jsonPath("$.acceptedCount").value(1))
                 .andExpect(jsonPath("$.rejected[0].reason").value("MISSING_COMPONENT_VERSION"))
                 .andExpect(jsonPath("$.rejected[1].reason").value("MISSING_COMPONENT_NAME"));
-        log.info("HTTP 输入摘要: 1 合法 + 缺版本 + 缺名，响应 PARTIAL_SUCCESS 且 HTTP 200");
+        log.info("HTTP 输入摘要: 1 合法 + 缺版本 + 缺名，响应 PARTIAL_SUCCESS 且 HTTP 207");
     }
 
     @Test
-    @DisplayName("畸形文档：HTTP 200 + status=FAILED + MALFORMED_DOCUMENT，报告随后 404")
+    @DisplayName("畸形文档：HTTP 422 + status=FAILED + MALFORMED_DOCUMENT，报告随后 404")
     void malformedDocumentFailsAndTargetAbsent() throws Exception {
         mockMvc.perform(post("/api/sbom/ingest")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(request("http-malformed", null, "{broken")))
-                .andExpect(status().isOk())
+                .andExpect(status().isUnprocessableEntity())
                 .andExpect(jsonPath("$.status").value("FAILED"))
                 .andExpect(jsonPath("$.rejected[0].reason").value("MALFORMED_DOCUMENT"));
         mockMvc.perform(get("/api/sbom/targets/http-malformed/report"))
                 .andExpect(status().isNotFound());
-        log.info("HTTP 输入摘要: 畸形 JSON，整体失败不建目标，报告 404");
+        log.info("HTTP 输入摘要: 畸形 JSON，整体失败不建目标，HTTP 422，报告 404");
     }
 
     @Test
@@ -128,6 +129,27 @@ class SbomControllerIntegrationTest {
                         .content("not-json"))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.error").value("INVALID_REQUEST"));
+    }
+
+    @Test
+    @DisplayName("幂等重放可外部识别：首次 200 无重放头，重复提交 200 + X-Idempotent-Replay: true")
+    void idempotentReplayIsSignalledViaHeader() throws Exception {
+        mockMvc.perform(post("/api/sbom/ingest")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(request("http-replay", null, CDX_VALID)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("SUCCESS"))
+                .andExpect(header().doesNotExist("X-Idempotent-Replay"));
+
+        mockMvc.perform(post("/api/sbom/ingest")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(request("http-replay", null, CDX_VALID)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("SUCCESS"))
+                .andExpect(jsonPath("$.acceptedCount").value(0))
+                .andExpect(jsonPath("$.duplicateCount").value(1))
+                .andExpect(header().string("X-Idempotent-Replay", "true"));
+        log.info("HTTP 输入摘要: 同一清单提交两次 | 首次 200 无重放头，二次 200 + X-Idempotent-Replay: true");
     }
 
     @Test
