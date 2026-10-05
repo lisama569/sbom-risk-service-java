@@ -148,7 +148,7 @@ class SbomParserTest {
     }
 
     @Test
-    @DisplayName("畸形 purl：回退字段法，生态归 unknown（判定层将落入 UNKNOWN，不默认安全）")
+    @DisplayName("畸形 purl：回退字段法，生态取字段值，但身份被标记为不可靠（判定层强制 UNKNOWN）")
     void malformedPurlFallsBackToUnknownEcosystem() {
         String doc = """
                 {"bomFormat":"CycloneDX","components":[
@@ -158,6 +158,74 @@ class SbomParserTest {
         log.info("输入摘要: 畸形 purl 条目 | 归一组件键={}", r.components().get(0).key());
         assertEquals(1, r.components().size());
         assertEquals("unknown", r.components().get(0).ecosystem());
+    }
+
+    @Test
+    @DisplayName("畸形 purl 但标了 maven：组件照常入库，坐标身份标记为不可靠，不得当 CLEAN 放行")
+    void malformedPurlLabeledMavenIsMarkedUnreliable() {
+        String doc = """
+                {"bomFormat":"CycloneDX","components":[
+                  {"name":"some-maven-lib","version":"1.0.0",
+                   "purl":"not-a-purl","ecosystems":["maven"]}]}
+                """;
+        ParseResult r = cdxParser.parse(doc);
+        log.info("输入摘要: 畸形 purl + ecosystems=[maven] | 组件键={} | 坐标备注={}",
+                r.components().get(0).key(), r.components().get(0).coordinateNote());
+        assertEquals(1, r.components().size());
+        assertEquals("maven", r.components().get(0).ecosystem());
+        org.junit.jupiter.api.Assertions.assertFalse(r.components().get(0).identityReliable());
+        org.junit.jupiter.api.Assertions.assertTrue(
+                r.components().get(0).coordinateNote().startsWith("malformed-purl:"));
+    }
+
+    @Test
+    @DisplayName("Maven 斜杠名字写法（组名/构件名）归一到与规则库一致的 groupId:artifactId 身份")
+    void mavenSlashNameSpellingNormalizesToRuleIdentity() {
+        String doc = """
+                {"bomFormat":"CycloneDX","components":[
+                  {"name":"org.apache.logging.log4j/log4j-core","version":"2.14.0",
+                   "ecosystems":["maven"]}]}
+                """;
+        var c = cdxParser.parse(doc).components().get(0);
+        log.info("输入摘要: 斜杠名字写法 | 判定依据: 归一身份={}", c.key());
+        assertEquals("maven::org.apache.logging.log4j:log4j-core@2.14.0", c.key());
+    }
+
+    @Test
+    @DisplayName("Maven 纯大小写不同的字段写法归一到同一身份（生态标签大小写同样归一）")
+    void mavenUpperCaseFieldSpellingNormalizes() {
+        String doc = """
+                {"bomFormat":"CycloneDX","components":[
+                  {"name":"ORG.APACHE.LOGGING.LOG4J/LOG4J-CORE","version":"2.14.0",
+                   "ecosystems":["MAVEN"]}]}
+                """;
+        var c = cdxParser.parse(doc).components().get(0);
+        log.info("输入摘要: 全大写 maven 字段写法 | 判定依据: 归一身份={}", c.key());
+        assertEquals("maven::org.apache.logging.log4j:log4j-core@2.14.0", c.key());
+    }
+
+    @Test
+    @DisplayName("条目级拒绝与 UNKNOWN 条目一一对应：不支持坐标、缺名、缺版本、非法版本各一条")
+    void rejectedItemsHavePairedUnresolvedEntries() {
+        ParseResult r = cdxParser.parse(CYCLONEDX_MIXED);
+        log.info("输入摘要: 混合清单 | rejected={} | unresolved={}",
+                r.rejected().size(), r.unresolved().size());
+        assertEquals(r.rejected().size(), r.unresolved().size());
+        for (var u : r.unresolved()) {
+            org.junit.jupiter.api.Assertions.assertTrue(u.reason().startsWith("UNKNOWN:"),
+                    "unresolved entry must carry an UNKNOWN reason: " + u);
+        }
+        // 不支持坐标类型的用例（pypi）同样要带出一条 UNKNOWN
+        String pypi = """
+                {"bomFormat":"CycloneDX","components":[
+                  {"name":"requests","version":"2.31.0","purl":"pkg:pypi/requests@2.31.0"}]}
+                """;
+        ParseResult r2 = cdxParser.parse(pypi);
+        assertEquals(1, r2.rejected().size());
+        assertEquals(1, r2.unresolved().size());
+        assertEquals("pypi::requests@2.31.0", r2.unresolved().get(0).key());
+        log.info("判定依据: pypi 条目 UNKNOWN 键={} 原因={}",
+                r2.unresolved().get(0).key(), r2.unresolved().get(0).reason());
     }
 
     @Test

@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.lisama569.sbomriskservicejava.model.Component;
 import com.github.lisama569.sbomriskservicejava.model.RejectedItem;
 import com.github.lisama569.sbomriskservicejava.model.SbomFormat;
+import com.github.lisama569.sbomriskservicejava.model.UnresolvedComponent;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -38,12 +39,15 @@ public class CycloneDxBomParser implements SbomParser {
         }
         List<Component> accepted = new ArrayList<>();
         List<RejectedItem> rejected = new ArrayList<>();
+        List<UnresolvedComponent> unresolved = new ArrayList<>();
         for (int i = 0; i < components.size(); i++) {
             JsonNode node = components.get(i);
             if (node == null || !node.isObject()) {
                 rejected.add(new RejectedItem(i,
                         com.github.lisama569.sbomriskservicejava.model.RejectReason.MISSING_COMPONENT_NAME,
                         "components[" + i + "] is not a JSON object"));
+                unresolved.add(new UnresolvedComponent("unknown::?@?",
+                        "UNKNOWN:missing-component-name"));
                 continue;
             }
             String name = text(node, "name");
@@ -56,9 +60,11 @@ public class CycloneDxBomParser implements SbomParser {
                 accepted.add(n.component());
             } else {
                 rejected.add(n.rejected());
+                unresolved.add(n.unresolved());
             }
         }
-        return new ParseResult(List.copyOf(accepted), List.copyOf(rejected));
+        return new ParseResult(List.copyOf(accepted), List.copyOf(rejected),
+                List.copyOf(unresolved));
     }
 
     private JsonNode readRoot(String rawContent) {

@@ -7,6 +7,7 @@ import com.github.lisama569.sbomriskservicejava.model.Component;
 import com.github.lisama569.sbomriskservicejava.model.RejectReason;
 import com.github.lisama569.sbomriskservicejava.model.RejectedItem;
 import com.github.lisama569.sbomriskservicejava.model.SbomFormat;
+import com.github.lisama569.sbomriskservicejava.model.UnresolvedComponent;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -38,11 +39,14 @@ public class SpdxBomParser implements SbomParser {
         }
         List<Component> accepted = new ArrayList<>();
         List<RejectedItem> rejected = new ArrayList<>();
+        List<UnresolvedComponent> unresolved = new ArrayList<>();
         for (int i = 0; i < packages.size(); i++) {
             JsonNode node = packages.get(i);
             if (node == null || !node.isObject()) {
                 rejected.add(new RejectedItem(i, RejectReason.MISSING_COMPONENT_NAME,
                         "packages[" + i + "] is not a JSON object"));
+                unresolved.add(new UnresolvedComponent("unknown::?@?",
+                        "UNKNOWN:missing-component-name"));
                 continue;
             }
             String name = text(node, "name");
@@ -54,9 +58,11 @@ public class SpdxBomParser implements SbomParser {
                 accepted.add(n.component());
             } else {
                 rejected.add(n.rejected());
+                unresolved.add(n.unresolved());
             }
         }
-        return new ParseResult(List.copyOf(accepted), List.copyOf(rejected));
+        return new ParseResult(List.copyOf(accepted), List.copyOf(rejected),
+                List.copyOf(unresolved));
     }
 
     /** 从 externalRefs 数组中取 referenceType=purl 的 referenceLocator。 */

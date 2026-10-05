@@ -59,9 +59,14 @@ public class SbomController {
             case FAILED -> HttpStatus.UNPROCESSABLE_ENTITY;
         };
         ResponseEntity.BodyBuilder builder = ResponseEntity.status(status);
+        boolean nothingNew = response.acceptedCount() == 0 && response.unresolvedCount() == 0;
+        boolean hadSubstance = response.duplicateCount() > 0 || response.rejectedCount() > 0;
         if (response.status() == IngestionStatus.SUCCESS
                 && response.acceptedCount() == 0 && response.duplicateCount() > 0) {
             // 纯幂等命中：本次提交没有产生任何新记录
+            builder.header(IDEMPOTENT_REPLAY_HEADER, "true");
+        } else if (nothingNew && hadSubstance) {
+            // 全部条目为已存在记录（含 UNKNOWN 条目重复提交）：同样是幂等命中
             builder.header(IDEMPOTENT_REPLAY_HEADER, "true");
         }
         return builder.body(response);

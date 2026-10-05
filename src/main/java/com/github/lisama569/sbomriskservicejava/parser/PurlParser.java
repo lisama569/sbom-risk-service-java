@@ -23,8 +23,15 @@ public final class PurlParser {
     public record Resolved(PackageCoordinate coordinate) implements Result {
     }
 
-    /** 坐标类型当前不支持（可区分处理，不当普通名字）。 */
-    public record Unsupported(String type) implements Result {
+    /**
+     * 坐标类型当前不支持（可区分处理，不当作可判定组件混入）。
+     *
+     * @param type    坐标类型（小写），如 pypi/golang
+     * @param rawName 从坐标中解析到的名称段（类型不支持，未做 maven/npm 式身份归一），
+     *                可能为 null；仅用于在报告中以 UNKNOWN 条目展示
+     * @param version 坐标中携带的版本，可能为 null
+     */
+    public record Unsupported(String type, String rawName, String version) implements Result {
     }
 
     /** 坐标写法畸形，无法解析出可靠身份。 */
@@ -69,9 +76,6 @@ public final class PurlParser {
         }
         String type = p.substring(0, slash).toLowerCase();
         String rest = p.substring(slash + 1);
-        if (!SUPPORTED_TYPES.contains(type)) {
-            return new Unsupported(type);
-        }
         // 版本取最后一个 @ 之后（名称段本身可能以 @ 开头，如 npm 作用域）
         String version = null;
         int at = rest.lastIndexOf('@');
@@ -81,41 +85,48 @@ public final class PurlParser {
         }
         String[] segments = rest.split("/");
         String name = percentDecode(segments[segments.length - 1]);
-        if (name.isBlank() || name.startsWith("@")) {
-            // 名称为空，或名称段以 @ 开头（@ 只允许出现在 npm 作用域段）
-            return new Malformed("purl has empty or illegal name segment: " + abbreviate(purl));
-        }
         String namespace = null;
         if (segments.length > 1) {
             StringBuilder ns = new StringBuilder();
             for (int i = 0; i < segments.length - 1; i++) {
                 String seg = percentDecode(segments[i]);
                 if (seg.isBlank()) {
-                    return new Malformed("purl has empty namespace segment: " + abbreviate(purl));
+                    // 空命名空间段对支持类型是畸形；不支持类型只做可区分拒绝，不继续校验
+                    if (SUPPORTED_TYPES.contains(type)) {
+                        return new Malformed("purl has empty namespace segment: " + abbreviate(purl));
+                    }
                 }
                 if (ns.length() > 0) {
-                    ns.append(type.equals("maven") ? '.' : '/');
+                    ns.append('/');
                 }
                 ns.append(seg);
             }
             namespace = ns.toString();
+        }
+        if (!SUPPORTED_TYPES.contains(type)) {
+            // 不支持类型：携带原文名称与版本，供报告以 UNKNOWN 条目展示，绝不丢弃
+            String rawName = (namespace == null || namespace.isBlank()) ? name : namespace + "/" + name;
+            return new Unsupported(type, rawName, version);
+        }
+        if (name.isBlank() || name.startsWith("@")) {
+            // 名称为空，或名称段以 @ 开头（@ 只允许出现在 npm 作用域段）
+            return new Malformed("purl has empty or illegal name segment: " + abbreviate(purl));
         }
         return switch (type) {
             case "maven" -> {
                 if (namespace == null) {
                     yield new Malformed("maven purl requires groupId namespace: " + abbreviate(purl));
                 }
-                yield new Resolved(new PackageCoordinate("maven", namespace + ":" + name, version));
+                // Maven 坐标大小写不敏感，整体小写归一到稳定身份
+                String canonical = IdentityNormalizer.name("maven", namespace + "/" + name);
+                yield new Resolved(new PackageCoordinate("maven", canonical, version));
             }
             case "npm" -> {
-                String canonical = name.toLowerCase(java.util.Locale.ROOT);
-                if (namespace != null) {
-                    String scope = namespace.startsWith("@") ? namespace : "@" + namespace;
-                    canonical = scope.toLowerCase(java.util.Locale.ROOT) + "/" + canonical;
-                }
+                String canonical = IdentityNormalizer.name("npm",
+                        namespace == null ? name : namespace + "/" + name);
                 yield new Resolved(new PackageCoordinate("npm", canonical, version));
             }
-            default -> new Unsupported(type); // 不可达：SUPPORTED_TYPES 已拦截
+            default -> new Unsupported(type, name, version); // 不可达：SUPPORTED_TYPES 已拦截
         };
     }
 

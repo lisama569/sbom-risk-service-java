@@ -5,6 +5,7 @@ import com.github.lisama569.sbomriskservicejava.model.ComponentRisk;
 import com.github.lisama569.sbomriskservicejava.model.PolicyRule;
 import com.github.lisama569.sbomriskservicejava.model.RiskLevel;
 import com.github.lisama569.sbomriskservicejava.model.RiskReport;
+import com.github.lisama569.sbomriskservicejava.model.UnresolvedComponent;
 import com.github.lisama569.sbomriskservicejava.model.VulnerabilityRule;
 import com.github.lisama569.sbomriskservicejava.rules.RuleRepository;
 import com.github.lisama569.sbomriskservicejava.version.SemVer;
@@ -55,18 +56,26 @@ public class RiskEvaluationService {
             throw new IllegalArgumentException("targetId must not be blank");
         }
         List<Component> components = componentRepository.findByTarget(targetId);
-        if (components.isEmpty()) {
+        List<UnresolvedComponent> unresolved = componentRepository.findUnresolved(targetId);
+        if (components.isEmpty() && unresolved.isEmpty()) {
             throw new TargetNotFoundException(targetId);
         }
         String rulesVersion = ruleRepository.version();
-        log.info("Risk evaluation start | targetId={} | components={} | rulesVersion={}",
-                targetId, components.size(), rulesVersion);
+        log.info("Risk evaluation start | targetId={} | components={} | unresolved={} | rulesVersion={}",
+                targetId, components.size(), unresolved.size(), rulesVersion);
 
-        List<ComponentRisk> risks = new ArrayList<>(components.size());
-        RiskLevel overall = RiskLevel.CLEAN;
+        // 合并已接受组件与无法判定条目，按组件键稳定排序，保证报告顺序可复现
+        List<ComponentRisk> risks = new ArrayList<>(components.size() + unresolved.size());
         for (Component c : components) {
-            ComponentRisk risk = evaluateOne(c);
-            risks.add(risk);
+            risks.add(evaluateOne(c));
+        }
+        for (UnresolvedComponent u : unresolved) {
+            risks.add(new ComponentRisk(u.key(), RiskLevel.UNKNOWN, List.of(u.reason())));
+        }
+        risks.sort(java.util.Comparator.comparing(ComponentRisk::component));
+
+        RiskLevel overall = RiskLevel.CLEAN;
+        for (ComponentRisk risk : risks) {
             if (risk.level().ordinal() > overall.ordinal()) {
                 overall = risk.level();
             }
@@ -82,6 +91,11 @@ public class RiskEvaluationService {
     }
 
     private ComponentRisk evaluateOne(Component component) {
+        // 坐标身份不可靠（如 purl 畸形，即使字段标着 maven）：一律 UNKNOWN，绝不放行成 CLEAN
+        if (!component.identityReliable()) {
+            return new ComponentRisk(component.key(), RiskLevel.UNKNOWN,
+                    List.of("UNKNOWN:unreliable-coordinate:" + component.coordinateNote()));
+        }
         SemVer version;
         try {
             version = SemVer.parse(component.version());

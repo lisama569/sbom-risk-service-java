@@ -81,12 +81,26 @@ class PurlParserTest {
     }
 
     @Test
+    @DisplayName("maven 大小写不敏感：坐标仅大小写不同也归一到同一稳定身份")
+    void mavenCoordinatesAreCaseInsensitive() {
+        PackageCoordinate lower = resolved("pkg:maven/org.apache.logging.log4j/log4j-core@2.14.0");
+        PackageCoordinate upper = resolved("pkg:maven/ORG.APACHE.LOGGING.LOG4J/LOG4J-CORE@2.14.0");
+        assertEquals(lower.ecosystem(), upper.ecosystem());
+        assertEquals(lower.name(), upper.name());
+        assertEquals("org.apache.logging.log4j:log4j-core", upper.name());
+        log.info("判定依据: 大小写不同的 maven 坐标归一 => {}", upper.name());
+    }
+
+    @Test
     @DisplayName("不支持的坐标类型：明确返回 Unsupported 且携带类型，绝不解析成普通名字")
     void unsupportedTypeIsDistinguishable() {
         Result r = PurlParser.parse("pkg:pypi/requests@2.31.0");
         log.info("输入摘要: purl=pkg:pypi/requests@2.31.0 | 判定: {}", r);
         Unsupported u = assertInstanceOf(Unsupported.class, r);
         assertEquals("pypi", u.type());
+        // 原始名称与版本随拒绝结果带出，供报告以 UNKNOWN 条目展示，绝不丢失
+        assertEquals("requests", u.rawName());
+        assertEquals("2.31.0", u.version());
     }
 
     @Test

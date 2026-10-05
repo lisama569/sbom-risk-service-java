@@ -250,4 +250,89 @@ class SbomIngestServiceTest {
         assertEquals(IngestionStatus.SUCCESS, second.status());
         assertEquals(500, repository.findByTarget("t-large").size());
     }
+
+    @Test
+    @DisplayName("无法判定条目持久化且幂等：不支持坐标条目重复提交只留一条，报告目标存在")
+    void unresolvedEntriesArePersistedAndIdempotent() {
+        String doc = """
+                {"bomFormat":"CycloneDX","components":[
+                  {"name":"requests","version":"2.31.0","purl":"pkg:pypi/requests@2.31.0"},
+                  {"name":"ok-lib","version":"1.0.0","ecosystems":["maven"]}
+                ]}
+                """;
+        IngestionResponse first = service.ingest("t-unresolved", doc);
+        IngestionResponse second = service.ingest("t-unresolved", doc);
+        log.info("输入摘要: pypi 不支持坐标 + maven 好组件提交两次 | 首次 unresolved={} | 二次 accepted={} duplicate={} unresolved={}",
+                first.unresolvedCount(), second.acceptedCount(), second.duplicateCount(),
+                second.unresolvedCount());
+        assertEquals(1, first.unresolvedCount());
+        assertEquals(IngestionStatus.PARTIAL_SUCCESS, first.status());
+        assertEquals(0, second.unresolvedCount(), "UNKNOWN 条目同样幂等，不重复写入");
+        assertEquals(1, repository.findUnresolved("t-unresolved").size());
+        org.junit.jupiter.api.Assertions.assertTrue(repository.existsTarget("t-unresolved"));
+    }
+
+    @Test
+    @DisplayName("全部条目无法判定的可解析文档：状态 PARTIAL_SUCCESS（207），UNKNOWN 仍进报告而非 404")
+    void allUnrecognizedDocumentStillProducesUnknownReport() {
+        String doc = """
+                {"bomFormat":"CycloneDX","components":[
+                  {"name":"requests","version":"2.31.0","purl":"pkg:pypi/requests@2.31.0"}
+                ]}
+                """;
+        IngestionResponse r = service.ingest("t-all-unknown", doc);
+        log.info("输入摘要: 唯一条目为 pypi 坐标 | 判定: status={} unresolved={}",
+                r.status(), r.unresolvedCount());
+        assertEquals(IngestionStatus.PARTIAL_SUCCESS, r.status());
+        assertEquals(1, repository.findUnresolved("t-all-unknown").size());
+    }
+
+    @Test
+    @DisplayName("并发等价写法（purl / 斜杠名字 / 全大写）：同一 Maven 库最终仅 1 条记录")
+    void concurrentSlashAndCaseSpellingsRemainIdempotent() throws InterruptedException {
+        String viaPurl = """
+                {"bomFormat":"CycloneDX","components":[
+                  {"name":"log4j-core","version":"2.14.0",
+                   "purl":"pkg:maven/org.apache.logging.log4j/log4j-core@2.14.0"}]}
+                """;
+        String viaSlash = """
+                {"bomFormat":"CycloneDX","components":[
+                  {"name":"org.apache.logging.log4j/log4j-core","version":"2.14.0",
+                   "ecosystems":["maven"]}]}
+                """;
+        String viaUpper = """
+                {"bomFormat":"CycloneDX","components":[
+                  {"name":"ORG.APACHE.LOGGING.LOG4J/LOG4J-CORE","version":"2.14.0",
+                   "ecosystems":["MAVEN"]}]}
+                """;
+        int threads = 15;
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+        CountDownLatch start = new CountDownLatch(1);
+        AtomicInteger accepted = new AtomicInteger();
+        AtomicInteger duplicate = new AtomicInteger();
+        for (int i = 0; i < threads; i++) {
+            final String d = i % 3 == 0 ? viaPurl : (i % 3 == 1 ? viaSlash : viaUpper);
+            pool.submit(() -> {
+                try {
+                    start.await();
+                    IngestionResponse r = service.ingest("t-equiv-slash-race", d);
+                    accepted.addAndGet(r.acceptedCount());
+                    duplicate.addAndGet(r.duplicateCount());
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            });
+        }
+        start.countDown();
+        pool.shutdown();
+        assertTrue(pool.awaitTermination(10, TimeUnit.SECONDS));
+        log.info("并发等价写法输入摘要: {} 个线程提交 purl/斜杠/大写 三种写法 | accepted={} duplicate={} 存储={}",
+                threads, accepted.get(), duplicate.get(),
+                repository.findByTarget("t-equiv-slash-race").size());
+        assertEquals(1, accepted.get());
+        assertEquals(threads - 1, duplicate.get());
+        assertEquals(1, repository.findByTarget("t-equiv-slash-race").size());
+        assertEquals("maven::org.apache.logging.log4j:log4j-core@2.14.0",
+                repository.findByTarget("t-equiv-slash-race").get(0).key());
+    }
 }

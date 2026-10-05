@@ -89,7 +89,7 @@ public class SbomIngestService {
                     targetId, e.getMessage());
             List<RejectedItem> rejected = List.of(
                     new RejectedItem(-1, RejectReason.MALFORMED_DOCUMENT, e.getMessage()));
-            return new IngestionResponse(targetId, IngestionStatus.FAILED, 0, 1, 0,
+            return new IngestionResponse(targetId, IngestionStatus.FAILED, 0, 1, 0, 0,
                     List.of(), rejected,
                     "ingestion failed: malformed or unrecognized document");
         }
@@ -123,11 +123,23 @@ public class SbomIngestService {
             }
 
             int rejectedCount = rejected.size();
+
+            // 无法判定条目持久化（与已接受组件同一目标锁内完成，按键去重，天然幂等）。
+            // 被拒绝绝不等于不存在：它们必须在报告中以 UNKNOWN 出现并抬高总体结论。
+            int newUnresolved = 0;
+            for (var u : parsed.unresolved()) {
+                if (componentRepository.putUnresolvedIfAbsent(targetId, u)) {
+                    newUnresolved++;
+                }
+            }
+
             IngestionStatus status;
-            if (newlyAccepted == 0 && duplicateCount == 0) {
-                // 没有任何条目落库：文档级解析能通过但条目全部非法，或重复文档内条目
+            if (newlyAccepted == 0 && duplicateCount == 0 && newUnresolved == 0) {
+                // 没有任何条目落库（含 UNKNOWN 条目）：文档级解析能通过但条目全部为
+                // 文档内重复（条目级非法条目会先作为 UNKNOWN 持久化，不走到这里）
                 status = IngestionStatus.FAILED;
             } else if (rejectedCount > 0) {
+                // 有条目落库/落 UNKNOWN，同时存在被拒绝条目（部分成功）
                 status = IngestionStatus.PARTIAL_SUCCESS;
             } else {
                 status = IngestionStatus.SUCCESS;
@@ -135,13 +147,17 @@ public class SbomIngestService {
 
             List<String> stored = componentRepository.findByTarget(targetId)
                     .stream().map(Component::key).sorted().toList();
+            int unresolvedTotal = componentRepository.findUnresolved(targetId).size();
             String summary = String.format(
-                    "parsed=%d, newlyAccepted=%d, duplicates=%d, rejected=%d, storedForTarget=%d",
-                    parsedCount, newlyAccepted, duplicateCount, rejectedCount, stored.size());
-            log.info("SBOM ingest result | targetId={} | status={} | {}", targetId, status, summary);
+                    "parsed=%d, newlyAccepted=%d, duplicates=%d, rejected=%d, storedForTarget=%d, unresolvedForTarget=%d",
+                    parsedCount, newlyAccepted, duplicateCount, rejectedCount,
+                    stored.size(), unresolvedTotal);
+            log.info("SBOM ingest result | targetId={} | status={} | newUnresolved={} | totalUnresolved={} | {}",
+                    targetId, status, newUnresolved, unresolvedTotal, summary);
 
             return new IngestionResponse(targetId, status, newlyAccepted, rejectedCount,
-                    duplicateCount, List.copyOf(components), List.copyOf(rejected), summary);
+                    duplicateCount, newUnresolved, List.copyOf(components), List.copyOf(rejected),
+                    summary);
         }
     }
 

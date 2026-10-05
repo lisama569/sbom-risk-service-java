@@ -212,6 +212,107 @@ class RiskEvaluationServiceTest {
         assertThrows(TargetNotFoundException.class, () -> risk.evaluate("no-such-target"));
     }
 
+    @Test
+    @DisplayName("无法判定条目进报告：不支持坐标类型的被拒条目单独列为 UNKNOWN 并抬高总体结论")
+    void unsupportedCoordinateEntryAppearsInReportAndRaisesOverall() {
+        // 真实场景：一份混合清单，大部分能判定，中间夹着一条暂不支持的坐标类型
+        String doc = """
+                {"bomFormat":"CycloneDX","components":[
+                  {"name":"com.example:clean-lib","version":"1.0.0","ecosystems":["maven"]},
+                  {"name":"requests","version":"2.31.0","purl":"pkg:pypi/requests@2.31.0"},
+                  {"name":"com.example:another-clean","version":"2.0.0","ecosystems":["maven"]}
+                ]}
+                """;
+        ingest.ingest("t-mixed-unsupported", doc);
+        RiskReport report = risk.evaluate("t-mixed-unsupported");
+        log.info("输入摘要: 2 个可判定 maven 组件 + 1 条 pypi 坐标 | 报告条目数={} 总体={}",
+                report.components().size(), report.overallLevel());
+        assertEquals(3, report.components().size(), "被拒条目不能从报告里消失");
+        ComponentRisk pypi = find(report, "pypi::requests@2.31.0");
+        assertEquals(RiskLevel.UNKNOWN, pypi.level());
+        assertTrueReasonStartsWith(pypi, "UNKNOWN:unsupported-coordinate-type:pypi");
+        // 关键回归点：总体结论绝不能停在 CLEAN
+        assertEquals(RiskLevel.UNKNOWN, report.overallLevel());
+        report.components().forEach(c -> log.info("判定依据: {} => {} ({})",
+                c.component(), c.level(), c.reasons()));
+    }
+
+    @Test
+    @DisplayName("坐标写坏但标了 maven：即使无规则命中也是 UNKNOWN，绝不因 maven 标签放成 CLEAN")
+    void malformedCoordinateLabeledMavenIsUnknown() {
+        String doc = """
+                {"bomFormat":"CycloneDX","components":[
+                  {"name":"some-maven-lib","version":"1.0.0",
+                   "purl":"not-a-purl","ecosystems":["maven"]}
+                ]}
+                """;
+        ingest.ingest("t-bad-purl-maven", doc);
+        RiskReport report = risk.evaluate("t-bad-purl-maven");
+        ComponentRisk cr = report.components().get(0);
+        log.info("输入摘要: 畸形 purl + ecosystems=[maven]，无规则命中 | 判定={} 依据={}",
+                cr.level(), cr.reasons());
+        assertEquals(RiskLevel.UNKNOWN, cr.level());
+        assertTrueReasonStartsWith(cr, "UNKNOWN:unreliable-coordinate:malformed-purl:");
+        assertEquals(RiskLevel.UNKNOWN, report.overallLevel());
+    }
+
+    @Test
+    @DisplayName("斜杠名字写法与大小写差异：归一到规则库身份，命中漏洞且只产生一条记录")
+    void slashSpellingAndCaseMatchRulesAndDeduplicate() {
+        String viaPurl = """
+                {"bomFormat":"CycloneDX","components":[
+                  {"name":"log4j-core","version":"2.14.0",
+                   "purl":"pkg:maven/org.apache.logging.log4j/log4j-core@2.14.0"}]}
+                """;
+        String viaSlashName = """
+                {"bomFormat":"CycloneDX","components":[
+                  {"name":"org.apache.logging.log4j/log4j-core","version":"2.14.0",
+                   "ecosystems":["maven"]}]}
+                """;
+        String viaUpper = """
+                {"bomFormat":"CycloneDX","components":[
+                  {"name":"ORG.APACHE.LOGGING.LOG4J/LOG4J-CORE","version":"2.14.0",
+                   "ecosystems":["MAVEN"]}]}
+                """;
+        var i1 = ingest.ingest("t-equiv", viaPurl);
+        var i2 = ingest.ingest("t-equiv", viaSlashName);
+        var i3 = ingest.ingest("t-equiv", viaUpper);
+        log.info("输入摘要: 同一 Maven 库三种写法（purl / 斜杠名字 / 全大写）| accepted={},{},{} duplicate={},{},{}",
+                i1.acceptedCount(), i2.acceptedCount(), i3.acceptedCount(),
+                i1.duplicateCount(), i2.duplicateCount(), i3.duplicateCount());
+        assertEquals(1, i1.acceptedCount());
+        assertEquals(0, i2.acceptedCount());
+        assertEquals(0, i3.acceptedCount());
+        RiskReport report = risk.evaluate("t-equiv");
+        assertEquals(1, report.components().size(), "等价写法必须只留一条记录");
+        ComponentRisk cr = report.components().get(0);
+        assertEquals("maven::org.apache.logging.log4j:log4j-core@2.14.0", cr.component());
+        assertEquals(RiskLevel.VULNERABLE, cr.level(), "斜杠写法必须能匹配漏洞规则，不得判成安全");
+        assertEquals(RiskLevel.VULNERABLE, report.overallLevel());
+    }
+
+    @Test
+    @DisplayName("缺名/缺版本/非法版本的坏条目同样进报告列为 UNKNOWN，总体不低于 UNKNOWN")
+    void malformedEntriesAppearInReportAsUnknown() {
+        String doc = """
+                {"bomFormat":"CycloneDX","components":[
+                  {"version":"1.0.0"},
+                  {"name":"no-version"},
+                  {"name":"bad-version","version":"v1.0.0"},
+                  {"name":"com.example:good","version":"1.0.0","ecosystems":["maven"]}
+                ]}
+                """;
+        ingest.ingest("t-bad-entries", doc);
+        RiskReport report = risk.evaluate("t-bad-entries");
+        log.info("输入摘要: 3 条坏条目 + 1 条好条目 | 报告条目数={} 总体={}",
+                report.components().size(), report.overallLevel());
+        assertEquals(4, report.components().size());
+        assertEquals(RiskLevel.UNKNOWN, report.overallLevel());
+        long unknowns = report.components().stream()
+                .filter(c -> c.level() == RiskLevel.UNKNOWN).count();
+        assertEquals(3, unknowns);
+    }
+
     private static void assertTrueReasonStartsWith(ComponentRisk cr, String prefix) {
         boolean ok = cr.reasons().stream().anyMatch(r -> r.startsWith(prefix));
         org.junit.jupiter.api.Assertions.assertTrue(ok,
