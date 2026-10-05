@@ -21,9 +21,11 @@ final class ComponentNormalizer {
      *       （生态 + 归一名称取自坐标；条目版本缺失时回退坐标版本）；</li>
      *   <li>purl 类型不支持 → 以 {@link RejectReason#UNSUPPORTED_PURL_TYPE} 明确拒绝，
      *       绝不当作普通名字混入；</li>
-     *   <li>purl 畸形 → 坐标不可靠，回退到 name / ecosystems 字段
-     *       （生态多为 unknown，风险判定会归入 UNKNOWN，不会默认安全）；</li>
-     *   <li>无 purl → 使用 name 字段，生态取 ecosystems 首项，否则 unknown。</li>
+     *   <li>purl 畸形 → 坐标不可靠：仍按 name / ecosystems 字段入库（保留清单事实），
+     *       但标记 {@code identityReliable=false}，判定层一律归入 UNKNOWN，
+     *       即使 ecosystems 标了 maven/npm 也绝不默认安全；</li>
+     *   <li>无 purl → 使用 name 字段（按生态归一写法：maven 斜杠转冒号并小写、npm 小写），
+     *       生态取 ecosystems 首项，否则 unknown。</li>
      * </ol>
      *
      * @param index     条目下标
@@ -37,6 +39,7 @@ final class ComponentNormalizer {
         String cleanName = name == null ? null : name.trim();
         String cleanVersion = version == null ? null : version.trim();
         String ecosystem = null;
+        boolean identityReliable = true;
 
         if (purl != null && !purl.isBlank()) {
             switch (PurlParser.parse(purl)) {
@@ -56,8 +59,9 @@ final class ComponentNormalizer {
                                     + PurlParser.SUPPORTED_TYPES + ")"));
                 }
                 case PurlParser.Malformed malformed -> {
-                    // 坐标解析不出可靠身份：回退字段法，生态多为 unknown，
-                    // 由风险判定归入 UNKNOWN，绝不默认安全
+                    // 坐标解析不出可靠身份：仍按字段法入库（保留清单事实），但标记身份不可靠，
+                    // 判定层一律归入 UNKNOWN——即使 ecosystems 标了 maven/npm 也绝不放行成安全
+                    identityReliable = false;
                 }
             }
         }
@@ -82,8 +86,42 @@ final class ComponentNormalizer {
         }
         if (ecosystem == null) {
             ecosystem = resolveEcosystem(ecosystems);
+            // 无坐标时的字段法身份：按生态归一名称写法，使等价写法落到同一稳定身份
+            cleanName = normalizeNameForEcosystem(ecosystem, cleanName);
         }
-        return new Normalized(new Component(ecosystem, cleanName, cleanVersion), null);
+        return new Normalized(new Component(ecosystem, cleanName, cleanVersion, identityReliable), null);
+    }
+
+    /**
+     * 字段法（无可靠 purl）下的名称归一，与坐标身份对齐：
+     * <ul>
+     *   <li>maven：{@code 组名/构件名} 斜杠写法转为 {@code 组名:构件名}（多段前缀以 . 连接，
+     *       与 purl 命名空间规则一致），整体小写；</li>
+     *   <li>npm：整体小写（{@code @Scope/Name} → {@code @scope/name}）；</li>
+     *   <li>其他/unknown：保持原样。</li>
+     * </ul>
+     */
+    static String normalizeNameForEcosystem(String ecosystem, String rawName) {
+        String n = rawName.trim();
+        return switch (ecosystem) {
+            case "maven" -> {
+                if (n.indexOf('/') > 0) {
+                    String[] segments = n.split("/");
+                    String artifact = segments[segments.length - 1];
+                    StringBuilder group = new StringBuilder();
+                    for (int i = 0; i < segments.length - 1; i++) {
+                        if (i > 0) {
+                            group.append('.');
+                        }
+                        group.append(segments[i]);
+                    }
+                    n = group + ":" + artifact;
+                }
+                yield n.toLowerCase(java.util.Locale.ROOT);
+            }
+            case "npm" -> n.toLowerCase(java.util.Locale.ROOT);
+            default -> n;
+        };
     }
 
     /** 无可靠坐标时的生态来源：ecosystems 数组首项，否则 unknown。 */

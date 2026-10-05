@@ -45,6 +45,18 @@ class PurlParserTest {
     }
 
     @Test
+    @DisplayName("maven 坐标大小写归一：仅字母大小写不同的坐标落到同一身份")
+    void mavenCoordinatesAreCaseInsensitive() {
+        PackageCoordinate lower = resolved("pkg:maven/org.apache.logging.log4j/log4j-core@2.14.0");
+        PackageCoordinate upper = resolved("pkg:maven/Org.Apache.Logging.Log4J/Log4J-Core@2.14.0");
+        log.info("输入摘要: 同一 maven 库大小写两种写法 | 小写身份={} | 大写归一后={}",
+                lower.name(), upper.name());
+        assertEquals(lower.ecosystem(), upper.ecosystem());
+        assertEquals(lower.name(), upper.name());
+        assertEquals("org.apache.logging.log4j:log4j-core", upper.name());
+    }
+
+    @Test
     @DisplayName("npm 作用域坐标：%40 编码与裸 @ 等价，名称小写归一")
     void npmScopedCoordinates() {
         PackageCoordinate a = resolved("pkg:npm/%40angular/core@15.0.0");

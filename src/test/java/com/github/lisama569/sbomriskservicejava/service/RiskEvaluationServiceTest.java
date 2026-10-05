@@ -212,6 +212,105 @@ class RiskEvaluationServiceTest {
         assertThrows(TargetNotFoundException.class, () -> risk.evaluate("no-such-target"));
     }
 
+    @Test
+    @DisplayName("斜杠名字写法命中漏洞规则：组名/构件名 写法归一后与规则登记身份对得上 => VULNERABLE")
+    void slashSpelledMavenNameMatchesVulnerabilityRule() {
+        ingest.ingest("t-slash", """
+                {"bomFormat":"CycloneDX","components":[
+                  {"name":"org.apache.logging.log4j/log4j-core","version":"2.14.0",
+                   "ecosystems":["maven"]}]}
+                """);
+        RiskReport report = risk.evaluate("t-slash");
+        ComponentRisk cr = report.components().get(0);
+        log.info("输入摘要: 斜杠名字 org.apache.logging.log4j/log4j-core@2.14.0 (maven) | 判定: {} | 依据: {}",
+                cr.level(), cr.reasons());
+        assertEquals("maven::org.apache.logging.log4j:log4j-core@2.14.0", cr.component());
+        assertEquals(RiskLevel.VULNERABLE, cr.level());
+        assertTrueReasonStartsWith(cr, "VULNERABLE:CVE-2021-44228");
+    }
+
+    @Test
+    @DisplayName("大小写坐标写法命中同一条漏洞规则：归一后身份与规则登记一致 => VULNERABLE")
+    void caseVariantPurlMatchesSameVulnerabilityRule() {
+        ingest.ingest("t-case", """
+                {"bomFormat":"CycloneDX","components":[
+                  {"name":"whatever","version":"2.14.0",
+                   "purl":"pkg:maven/Org.Apache.Logging.Log4J/Log4J-Core@2.14.0"}]}
+                """);
+        RiskReport report = risk.evaluate("t-case");
+        ComponentRisk cr = report.components().get(0);
+        log.info("输入摘要: 大写坐标 pkg:maven/Org.Apache.Logging.Log4J/Log4J-Core@2.14.0 | 判定: {} | 依据: {}",
+                cr.level(), cr.reasons());
+        assertEquals(RiskLevel.VULNERABLE, cr.level());
+        assertTrueReasonStartsWith(cr, "VULNERABLE:CVE-2021-44228");
+    }
+
+    @Test
+    @DisplayName("畸形 purl 但标了 maven：坐标解析不出可靠身份 => UNKNOWN，绝不因名字字段放行成安全")
+    void malformedPurlWithMavenTagYieldsUnknownNotClean() {
+        ingest.ingest("t-bad-purl", """
+                {"bomFormat":"CycloneDX","components":[
+                  {"name":"com.example:no-rule-lib","version":"1.0.0",
+                   "ecosystems":["maven"],"purl":"pkg:maven/only-one-segment@1.0.0"},
+                  {"name":"com.example:judgeable-lib","version":"1.0.0","ecosystems":["maven"]}
+                ]}
+                """);
+        RiskReport report = risk.evaluate("t-bad-purl");
+        ComponentRisk badPurl = find(report, "no-rule-lib");
+        ComponentRisk judgeable = find(report, "judgeable-lib");
+        log.info("输入摘要: 1 条畸形 purl(标 maven) + 1 条正常 maven | 畸形判定={} 依据={} | 正常判定={}",
+                badPurl.level(), badPurl.reasons(), judgeable.level());
+        assertEquals(RiskLevel.UNKNOWN, badPurl.level());
+        assertTrueReasonStartsWith(badPurl, "UNKNOWN:unreliable-identity");
+        assertEquals(RiskLevel.CLEAN, judgeable.level());
+        assertEquals(RiskLevel.UNKNOWN, report.overallLevel());
+    }
+
+    @Test
+    @DisplayName("被拒条目进入报告：不支持坐标类型的条目以 UNKNOWN 出现在报告并抬高总体结论")
+    void rejectedEntryAppearsInReportAndRaisesOverall() {
+        ingest.ingest("t-mixed", """
+                {"bomFormat":"CycloneDX","components":[
+                  {"name":"com.example:known-lib","version":"1.0.0","ecosystems":["maven"]},
+                  {"name":"requests","version":"2.31.0","purl":"pkg:pypi/requests@2.31.0"}
+                ]}
+                """);
+        RiskReport report = risk.evaluate("t-mixed");
+        ComponentRisk known = find(report, "known-lib");
+        ComponentRisk unresolved = report.components().stream()
+                .filter(c -> c.component().startsWith("unresolved::"))
+                .findFirst().orElseThrow(() -> new AssertionError(
+                        "报告中应包含无法判定条目，实际: " + report.components()));
+        log.info("输入摘要: 1 正常 maven 组件 + 1 条 pypi 坐标(被拒) | 正常判定={} | 无法判定条目={} 依据={}",
+                known.level(), unresolved.component(), unresolved.reasons());
+        assertEquals(RiskLevel.CLEAN, known.level());
+        assertEquals(RiskLevel.UNKNOWN, unresolved.level());
+        assertTrueReasonStartsWith(unresolved, "UNKNOWN:ingest-rejected:UNSUPPORTED_PURL_TYPE");
+        // 总体结论至少抬到 UNKNOWN，绝不能停在“安全”
+        assertEquals(RiskLevel.UNKNOWN, report.overallLevel());
+    }
+
+    @Test
+    @DisplayName("无法判定条目幂等：同一份部分成功清单重复提交，报告中的 UNKNOWN 条目不累积")
+    void unjudgeableEntriesAreIdempotentAcrossResubmissions() {
+        String doc = """
+                {"bomFormat":"CycloneDX","components":[
+                  {"name":"com.example:known-lib","version":"1.0.0","ecosystems":["maven"]},
+                  {"name":"requests","version":"2.31.0","purl":"pkg:pypi/requests@2.31.0"}
+                ]}
+                """;
+        ingest.ingest("t-unj-idem", doc);
+        ingest.ingest("t-unj-idem", doc);
+        RiskReport report = risk.evaluate("t-unj-idem");
+        long unresolvedCount = report.components().stream()
+                .filter(c -> c.component().startsWith("unresolved::")).count();
+        log.info("输入摘要: 部分成功清单重复提交两次 | 报告条目数={} 其中无法判定={}",
+                report.components().size(), unresolvedCount);
+        assertEquals(1, unresolvedCount, "重复提交不得累积无法判定条目");
+        assertEquals(2, report.components().size());
+        assertEquals(RiskLevel.UNKNOWN, report.overallLevel());
+    }
+
     private static void assertTrueReasonStartsWith(ComponentRisk cr, String prefix) {
         boolean ok = cr.reasons().stream().anyMatch(r -> r.startsWith(prefix));
         org.junit.jupiter.api.Assertions.assertTrue(ok,

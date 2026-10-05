@@ -9,9 +9,10 @@
 - **多格式摄入与归一化**：支持 CycloneDX JSON 与 SPDX 2.3 JSON，归一到统一 `Component`
   （生态 / 名称 / 版本）模型。
 - **包坐标身份归一**：以 purl（Package URL）为可靠身份来源，支持 Maven
-  （`组名:构件名`）与 npm（`@作用域/名称`）两类坐标；等价写法（大小写 scheme、
-  `%40` 编码、qualifiers/subpath、随意的名字字段）归一到同一稳定身份；
-  不同生态之间身份严格隔离，互不串号。
+  （`组名:构件名`）与 npm（`@作用域/名称`）两类坐标；等价写法（大小写 scheme 或
+  坐标字母大小写、`%40` 编码、qualifiers/subpath、斜杠拼接的名字字段、随意的名字
+  字段）归一到同一稳定身份，并能与规则库登记的组件对上；不同生态之间身份严格隔离，
+  互不串号。
 - **不静默跳过任何坏条目**：缺名称、缺版本、版本非法、文档内重复、不支持的坐标类型
   均给出**可区分的拒绝原因**；文档级畸形与条目级问题分开表达。
 - **去重与幂等**：同一目标下组件以 `生态::名称@版本` 为键去重；同一份清单（含等价
@@ -19,7 +20,9 @@
 - **本地规则判定**：漏洞规则 + 策略规则，版本按语义化版本（SemVer 2.0）比较，
   正确处理范围与通配符；无法判定时结论为 **UNKNOWN**，绝不默认安全。
 - **无法判定兜底**：生态无法识别（规则库未覆盖）或坐标解析不出可靠身份的组件，
-  一律归为 **UNKNOWN**；只有确实能判定且未命中任何规则的组件才是 **CLEAN**。
+  一律归为 **UNKNOWN**；摄入时被拒的条目也以单独的 UNKNOWN 结论进入报告，
+  并把目标总体结论至少抬到 UNKNOWN；只有确实能判定且未命中任何规则的组件
+  才是 **CLEAN**。
 - **可复现**：报告携带规则版本号；组件集合与规则版本不变时，判定结论逐字段一致；
   规则原子更新后，结论按新版本可复现地变化。
 - **传输层可区分三态**：HTTP 状态码直接区分 整体失败（422）/ 部分成功（207）/
@@ -42,7 +45,7 @@
 
 | 坐标类型 | 写法 | 归一后的组件身份（`Component.name`） |
 |---|---|---|
-| Maven | `pkg:maven/<groupId>/<artifactId>@<version>` | `groupId:artifactId`（与规则库登记写法一致） |
+| Maven | `pkg:maven/<groupId>/<artifactId>@<version>` | `groupId:artifactId`（小写，与规则库登记写法一致） |
 | npm（无作用域） | `pkg:npm/<name>@<version>` | `name`（小写） |
 | npm（带作用域） | `pkg:npm/%40<scope>/<name>@<version>` 或 `pkg:npm/@<scope>/<name>@<version>` | `@scope/name`（小写） |
 
@@ -51,9 +54,21 @@
 - scheme（`pkg:`）大小写不敏感，type 一律小写；
 - qualifiers（`?type=jar...`）与 subpath（`#...`）不参与身份，直接剥离；
 - 各段做百分号解码（`%40` → `@`），`+` 保持原样；
+- maven 坐标（组名+构件名）一律小写：同一库仅坐标字母大小写不同的写法
+  （如 `pkg:maven/Org.Apache.../Log4J-Core@...`）归一到同一身份；
 - npm 名称/作用域一律小写；npm 作用域段缺 `@` 前缀时自动补全；
 - purl 解析成功时，**坐标身份优先于名字字段**（名字写得随意也不影响身份）；
 - 条目版本字段缺失时，回退使用坐标中的版本。
+
+**无坐标时的字段法归一**（条目只有 `name` + `ecosystems`）：名字字段同样按生态归一，
+使等价写法与坐标身份对得上、也能命中规则库登记的组件：
+
+- `ecosystems: ["maven"]` 且名字写成 `组名/构件名`（斜杠拼接，如
+  `org.apache.logging.log4j/log4j-core`）→ 归一为 `组名:构件名`，整体小写，
+  与 purl 坐标身份一致，**能正常命中漏洞/策略规则**；
+- `ecosystems: ["npm"]` → 名字小写（`@Scope/Name` → `@scope/name`）；
+- 因此同一组件的 purl 写法、冒号写法、斜杠写法、大小写变体，先后或并发提交
+  都只产生一条记录（身份键相同，幂等去重）。
 
 **生态隔离**：身份键为 `生态::名称@版本`，规则匹配键为 `生态::名称`。
 `pkg:maven/lodash/lodash@4.17.20`（身份 `maven::lodash:lodash`）与
@@ -61,9 +76,14 @@
 npm 的漏洞规则不会命中 maven 同名构件，反之亦然。
 
 **不支持的坐标类型**（pypi、golang 等）：条目以 `UNSUPPORTED_PURL_TYPE` 明确拒绝，
-绝不当作普通名字混入；**畸形 purl**（缺 scheme、缺名称段、Maven 缺 groupId 等）：
-坐标不可靠，回退到 `name` / `ecosystems` 字段（生态通常为 `unknown`，
-判定层会归入 UNKNOWN，见第 4 节）。
+绝不当作普通名字混入；被拒条目会作为**无法判定条目**随目标保存，以 UNKNOWN 结论
+出现在风险报告中（见第 4 节）。
+
+**畸形 purl**（缺 scheme、缺名称段、Maven 缺 groupId 等）：坐标解析不出可靠身份。
+条目仍按 `name` / `ecosystems` 字段入库（保留清单事实），但身份被标记为**不可靠**
+（`identityReliable=false`）：即使 `ecosystems` 标了 `maven`/`npm`，判定结论也一律为
+**UNKNOWN**（依据 `UNKNOWN:unreliable-identity:malformed-purl`），
+绝不能凭名字字段或生态标注放行成“安全”。
 
 ### 2.2 拒绝原因（逐条、可区分，不静默跳过）
 
@@ -109,19 +129,33 @@ npm 的漏洞规则不会命中 maven 同名构件，反之亦然。
 |---|---|
 | `DENIED`（最严重） | 命中本地策略规则（策略按 生态+名称 匹配；策略无 `range` 表示全版本） |
 | `VULNERABLE` | 命中任一漏洞规则的受影响版本范围 |
-| `UNKNOWN` | **无法判定**：生态无法识别（规则库未覆盖，含 `unknown`）、版本无法解析、或相关规则的版本区间非法。绝不默认安全；总体结论中 UNKNOWN 比 CLEAN 更需要关注 |
-| `CLEAN` | 生态可判定（当前为 maven / npm）且确实无规则命中（依据明确：`CLEAN:no-rules-matched` 或 `CLEAN:all-ranges-excluded`） |
+| `UNKNOWN` | **无法判定**：生态无法识别（规则库未覆盖，含 `unknown`）、坐标解析不出可靠身份（畸形 purl）、版本无法解析、相关规则的版本区间非法，或条目在摄入时被拒（不支持的坐标类型等）。绝不默认安全；总体结论中 UNKNOWN 比 CLEAN 更需要关注 |
+| `CLEAN` | 生态可判定（当前为 maven / npm）、身份可靠，且确实无规则命中（依据明确：`CLEAN:no-rules-matched` 或 `CLEAN:all-ranges-excluded`） |
 
 每条结论都带 `reasons` 判定依据，如：
 `VULNERABLE:CVE-2021-44228:in-range[[2.0.0,2.12.3), [2.13.0,2.15.0)]`、
 `DENIED:POLICY-BANNED-LEGACY:...`、`UNKNOWN:illegal-vuln-range:...`、
-`UNKNOWN:unrecognized-ecosystem:unknown`。
+`UNKNOWN:unrecognized-ecosystem:unknown`、
+`UNKNOWN:unreliable-identity:malformed-purl`、
+`UNKNOWN:ingest-rejected:UNSUPPORTED_PURL_TYPE:...`。
 
 > **UNKNOWN 兜底原则**：凡是生态认不出来、或坐标解析不出可靠身份的组件，
 > 即使没有任何规则命中，也只会得到 `UNKNOWN`（依据
-> `UNKNOWN:unrecognized-ecosystem:<生态>`），永远不会被当成“安全”。
+> `UNKNOWN:unrecognized-ecosystem:<生态>` 或 `UNKNOWN:unreliable-identity:...`），
+> 永远不会被当成“安全”——即使条目旁边标了 `ecosystems: ["maven"]`，
+> 只要坐标写坏了、解析不出可靠身份，结论就是 UNKNOWN。
 > 目标总体等级取各组件最严重者，因此一个 UNKNOWN 组件会把总体结论抬到
 > 至少 UNKNOWN。
+
+### 无法判定条目进入报告
+
+摄入时被拒的条目（不支持的坐标类型、缺名/缺版本、版本非法等；“文档内重复”除外，
+因为该组件已由首次出现的那条参与判定）会作为**无法判定条目**随目标持久化，
+在风险报告中以单独的 UNKNOWN 结论出现（`component` 形如
+`unresolved::UNSUPPORTED_PURL_TYPE#3`，依据为 `UNKNOWN:ingest-rejected:<原因>:<明细>`），
+并把目标总体结论至少抬到 UNKNOWN——**绝不会因为一条条目被拒就当它不存在、
+让总体停在“安全”**。相同条目重复/并发提交按 原因+下标+明细 去重，不会累积，
+报告内容保持可复现。
 
 ### 本地规则文件
 
@@ -206,8 +240,17 @@ npm 的漏洞规则不会命中 maven 同名构件，反之亦然。
 }
 ```
 
-目标不存在（没有任何成功入库的组件）返回 `404 TARGET_NOT_FOUND`；请求体非法返回
-`400 INVALID_REQUEST`。
+目标不存在（没有任何成功入库的组件，也没有无法判定条目）返回 `404 TARGET_NOT_FOUND`；
+请求体非法返回 `400 INVALID_REQUEST`。
+
+若清单中有被拒的无法判定条目，报告中会额外出现如下条目，且 `overallLevel`
+至少为 `UNKNOWN`：
+
+```json
+{"component": "unresolved::UNSUPPORTED_PURL_TYPE#3",
+ "level": "UNKNOWN",
+ "reasons": ["UNKNOWN:ingest-rejected:UNSUPPORTED_PURL_TYPE:component at index 3 uses unsupported purl type 'pypi' (supported: [maven, npm])"]}
+```
 
 ## 6. 并发与幂等语义
 
@@ -217,16 +260,19 @@ npm 的漏洞规则不会命中 maven 同名构件，反之亦然。
 - **重复提交**：同一份清单重复提交时，首次 `acceptedCount=N`，后续 `acceptedCount=0`、
   `duplicateCount=N`，存储记录始终只有一份，状态为 `SUCCESS`（幂等成功），
   且响应携带 `X-Idempotent-Replay: true` 头。
-- **等价写法幂等**：同一组件的等价坐标写法（purl 坐标 vs 名字+生态、大小写/编码差异）
-  归一到同一身份键，并发或先后提交都只产生一条记录。
+- **等价写法幂等**：同一组件的等价坐标写法（purl 坐标 vs 冒号/斜杠名字+生态、
+  坐标字母大小写、编码差异）归一到同一身份键，并发或先后提交都只产生一条记录。
+- **无法判定条目幂等**：被拒的无法判定条目按 原因+下标+明细 去重，
+  重复/并发提交不会在报告中累积。
 - **大清单稳定**：清单条目数量增多不改变幂等与去重语义（500 条清单重复提交有测试覆盖）。
-- **部分失败隔离**：单条目失败只记录到 `rejected[]`，不影响同份清单其他条目入库。
+- **部分失败隔离**：单条目失败只记录到 `rejected[]`（并作为无法判定条目进入报告），
+  不影响同份清单其他条目入库。
 - **整体失败隔离**：文档级失败不创建任何组件记录，随后查询报告得到 404。
 - **规则原子性**：规则快照为 `volatile` 引用整体替换，判定期间不会读到半更新状态。
 
 ## 7. 验证方法
 
-### 运行全部测试（116 个）
+### 运行全部测试（128 个）
 
 ```bash
 mvn test
@@ -238,11 +284,11 @@ mvn test
 |---|---|
 | `version/SemVerTest` | SemVer 解析/预发布/前导零/比较（含输入摘要与依据日志） |
 | `version/VersionRangeTest` | 比较符、`^`/`~`、通配符、开闭区间、OR 区间、非法区间 |
-| `parser/PurlParserTest` | maven/npm 坐标解析、等价写法归一（scheme 大小写、`%40` 编码、qualifiers/subpath）、跨生态隔离、不支持类型、畸形坐标 |
-| `parser/SbomParserTest` | 两种格式归一化、坐标身份优先、版本回退 purl、`UNSUPPORTED_PURL_TYPE`、畸形 purl 回退、字段缺失/非法版本分类、畸形文档、格式识别 |
-| `service/SbomIngestServiceTest` | 三态分类、文档内去重、重复提交幂等、16 线程并发幂等、并发等价坐标写法、500 条大清单重复提交、并发不同组件 |
-| `service/RiskEvaluationServiceTest` | DENIED/VULNERABLE/CLEAN/UNKNOWN、生态不可识别兜底 UNKNOWN、跨生态规则隔离、范围边界、规则原子更新、结论复现 |
-| `web/SbomControllerIntegrationTest` | HTTP 全链路：两种格式、200/207/422 传输层三态、`X-Idempotent-Replay` 幂等头、等价写法去重、不支持坐标类型、400、404、HTTP 并发幂等 |
+| `parser/PurlParserTest` | maven/npm 坐标解析、等价写法归一（scheme 大小写、坐标字母大小写、`%40` 编码、qualifiers/subpath）、跨生态隔离、不支持类型、畸形坐标 |
+| `parser/SbomParserTest` | 两种格式归一化、坐标身份优先、版本回退 purl、斜杠名字/大小写字段法归一、畸形 purl 标记身份不可靠、`UNSUPPORTED_PURL_TYPE`、字段缺失/非法版本分类、畸形文档、格式识别 |
+| `service/SbomIngestServiceTest` | 三态分类、文档内去重、重复提交幂等、16 线程并发幂等、并发等价坐标写法、等价写法（purl/斜杠名字/大小写坐标）跨提交去重、跨生态不串号、500 条大清单重复提交、并发不同组件 |
+| `service/RiskEvaluationServiceTest` | DENIED/VULNERABLE/CLEAN/UNKNOWN、生态不可识别兜底 UNKNOWN、畸形 purl 标 maven 也归 UNKNOWN、斜杠/大小写写法命中漏洞规则、被拒条目进入报告并抬高总体、无法判定条目幂等、跨生态规则隔离、范围边界、规则原子更新、结论复现 |
+| `web/SbomControllerIntegrationTest` | HTTP 全链路：两种格式、200/207/422 传输层三态、`X-Idempotent-Replay` 幂等头、等价写法去重、不支持坐标类型、被拒条目抬高报告总体结论、400、404、HTTP 并发幂等 |
 
 单元测试日志均打印**输入摘要与判定依据**，例如：
 
@@ -278,6 +324,23 @@ curl -s -i -X POST localhost:8080/api/sbom/ingest -H 'Content-Type: application/
 # 部分成功：HTTP 207；畸形文档：HTTP 422
 curl -s -o /dev/null -w '%{http_code}\n' -X POST localhost:8080/api/sbom/ingest \
   -H 'Content-Type: application/json' -d '{"targetId":"demo2","content":"{broken"}'
+
+# 混着来的清单：1 条正常 maven + 1 条不支持的 pypi 坐标 -> HTTP 207
+curl -s -X POST localhost:8080/api/sbom/ingest -H 'Content-Type: application/json' -d '{
+  "targetId":"demo3",
+  "content":"{\"bomFormat\":\"CycloneDX\",\"components\":[{\"name\":\"com.example:ok-lib\",\"version\":\"1.0.0\",\"ecosystems\":[\"maven\"]},{\"name\":\"requests\",\"version\":\"2.31.0\",\"purl\":\"pkg:pypi/requests@2.31.0\"}]}"
+}'
+
+# 报告：正常组件 CLEAN，被拒条目以 unresolved::UNSUPPORTED_PURL_TYPE 单独出现，
+# 总体结论被抬到 UNKNOWN（不会停在“安全”）
+curl -s localhost:8080/api/sbom/targets/demo3/report | python3 -m json.tool
+
+# 斜杠名字写法与 purl 写法归一到同一身份，照样命中漏洞规则 -> VULNERABLE
+curl -s -X POST localhost:8080/api/sbom/ingest -H 'Content-Type: application/json' -d '{
+  "targetId":"demo4",
+  "content":"{\"bomFormat\":\"CycloneDX\",\"components\":[{\"name\":\"org.apache.logging.log4j/log4j-core\",\"version\":\"2.14.0\",\"ecosystems\":[\"maven\"]}]}"
+}'
+curl -s localhost:8080/api/sbom/targets/demo4/report | python3 -m json.tool
 ```
 
 ## 8. 工程结构

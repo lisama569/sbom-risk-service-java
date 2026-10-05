@@ -194,6 +194,34 @@ class SbomControllerIntegrationTest {
     }
 
     @Test
+    @DisplayName("被拒条目抬高报告：部分成功摄入后，报告含 UNKNOWN 无法判定条目且总体至少 UNKNOWN")
+    void rejectedEntryAppearsInReportAndRaisesOverallLevel() throws Exception {
+        String doc = """
+                {"bomFormat":"CycloneDX","components":[
+                  {"name":"com.example:ok-lib","version":"1.0.0","ecosystems":["maven"]},
+                  {"name":"requests","version":"2.31.0","purl":"pkg:pypi/requests@2.31.0"}]}
+                """;
+        mockMvc.perform(post("/api/sbom/ingest")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(request("http-unjudgeable", null, doc)))
+                .andExpect(status().isMultiStatus());
+        mockMvc.perform(get("/api/sbom/targets/http-unjudgeable/report"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.overallLevel").value("UNKNOWN"))
+                .andExpect(jsonPath("$.components.length()").value(2))
+                .andExpect(jsonPath("$.components[0].component")
+                        .value("maven::com.example:ok-lib@1.0.0"))
+                .andExpect(jsonPath("$.components[0].level").value("CLEAN"))
+                .andExpect(jsonPath("$.components[1].component")
+                        .value(org.hamcrest.Matchers.startsWith("unresolved::UNSUPPORTED_PURL_TYPE")))
+                .andExpect(jsonPath("$.components[1].level").value("UNKNOWN"))
+                .andExpect(jsonPath("$.components[1].reasons[0]")
+                        .value(org.hamcrest.Matchers.containsString("UNSUPPORTED_PURL_TYPE")));
+        log.info("HTTP 输入摘要: 1 正常 maven 组件 + 1 条 pypi 坐标 | 判定: 报告总体 UNKNOWN，"
+                + "正常组件 CLEAN，被拒条目以 UNKNOWN 单独出现在报告中");
+    }
+
+    @Test
     @DisplayName("请求体非法 JSON -> 400 INVALID_REQUEST")
     void invalidHttpRequestIs400() throws Exception {
         mockMvc.perform(post("/api/sbom/ingest")

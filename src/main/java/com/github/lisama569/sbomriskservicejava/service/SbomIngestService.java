@@ -26,8 +26,10 @@ import java.util.Set;
  * <ul>
  *   <li>文档级畸形（非法 JSON、缺少 components/packages 等）→ {@link IngestionStatus#FAILED}，
  *       整个请求不入库；</li>
- *   <li>部分条目缺名/缺版本/版本非法/文档内重复 → 逐条记录拒绝原因，其余条目照常入库，
- *       状态为 {@link IngestionStatus#PARTIAL_SUCCESS}；</li>
+ *   <li>部分条目缺名/缺版本/版本非法/坐标类型不支持/文档内重复 → 逐条记录拒绝原因，
+ *       其余条目照常入库，状态为 {@link IngestionStatus#PARTIAL_SUCCESS}；
+ *       其中除“文档内重复”外的被拒条目会作为<b>无法判定条目</b>随目标持久化，
+ *       在风险报告中以 UNKNOWN 结论出现并抬高总体结论（不因被拒就当它不存在）；</li>
  *   <li>同一目标用锁串行化：并发提交被串行处理，已存在的组件计 duplicate，不产生重复记录，
  *       整份清单重复提交表现为幂等（accepted=0、duplicate=全部）；</li>
  *   <li>全部条目入库成功为 {@link IngestionStatus#SUCCESS}。</li>
@@ -133,12 +135,28 @@ public class SbomIngestService {
                 status = IngestionStatus.SUCCESS;
             }
 
+            // 无法判定条目（除文档内重复外）随目标持久化：它们会以 UNKNOWN 结论出现在
+            // 风险报告中并抬高总体结论，绝不能因为条目被拒就当它不存在。
+            // 相同条目重复/并发提交由仓库按键去重，不会累积。
+            int unjudgeableRecorded = 0;
+            for (RejectedItem item : rejected) {
+                if (item.reason() == RejectReason.DUPLICATE_COMPONENT) {
+                    // 文档内重复的组件已由首次出现的那条参与判定，不算无法判定
+                    continue;
+                }
+                if (componentRepository.putUnjudgeableIfAbsent(targetId, item)) {
+                    unjudgeableRecorded++;
+                }
+            }
+
             List<String> stored = componentRepository.findByTarget(targetId)
                     .stream().map(Component::key).sorted().toList();
             String summary = String.format(
-                    "parsed=%d, newlyAccepted=%d, duplicates=%d, rejected=%d, storedForTarget=%d",
-                    parsedCount, newlyAccepted, duplicateCount, rejectedCount, stored.size());
-            log.info("SBOM ingest result | targetId={} | status={} | {}", targetId, status, summary);
+                    "parsed=%d, newlyAccepted=%d, duplicates=%d, rejected=%d, storedForTarget=%d, unjudgeableForTarget=%d",
+                    parsedCount, newlyAccepted, duplicateCount, rejectedCount, stored.size(),
+                    componentRepository.findUnjudgeableByTarget(targetId).size());
+            log.info("SBOM ingest result | targetId={} | status={} | {} | newlyUnjudgeable={}",
+                    targetId, status, summary, unjudgeableRecorded);
 
             return new IngestionResponse(targetId, status, newlyAccepted, rejectedCount,
                     duplicateCount, List.copyOf(components), List.copyOf(rejected), summary);

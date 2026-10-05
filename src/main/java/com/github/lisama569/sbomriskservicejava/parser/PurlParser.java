@@ -41,7 +41,8 @@ public final class PurlParser {
      *   <li>scheme（{@code pkg:}）大小写不敏感；type 一律小写；</li>
      *   <li>qualifiers（{@code ?...}）与 subpath（{@code #...}）不参与身份，直接剥离；</li>
      *   <li>各段做百分号解码（{@code %40} → {@code @} 等），{@code +} 保持原样；</li>
-     *   <li>maven：{@code 命名空间:名称}；npm：名称小写，作用域段补全 {@code @} 前缀。</li>
+     *   <li>maven：{@code 命名空间:名称}，整体小写（仅大小写不同的坐标归一到同一身份）；
+     *       npm：名称小写，作用域段补全 {@code @} 前缀。</li>
      * </ul>
      *
      * @param purl purl 原文（非 null、非空白，调用方保证）
@@ -105,7 +106,9 @@ public final class PurlParser {
                 if (namespace == null) {
                     yield new Malformed("maven purl requires groupId namespace: " + abbreviate(purl));
                 }
-                yield new Resolved(new PackageCoordinate("maven", namespace + ":" + name, version));
+                // 大小写不敏感归一：同一库仅坐标字母大小写不同的写法落到同一身份
+                String canonical = (namespace + ":" + name).toLowerCase(java.util.Locale.ROOT);
+                yield new Resolved(new PackageCoordinate("maven", canonical, version));
             }
             case "npm" -> {
                 String canonical = name.toLowerCase(java.util.Locale.ROOT);

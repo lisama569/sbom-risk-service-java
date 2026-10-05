@@ -227,6 +227,60 @@ class SbomIngestServiceTest {
     }
 
     @Test
+    @DisplayName("等价写法去重：purl / 斜杠名字 / 大小写坐标 三种写法先后提交，只留一条记录")
+    void equivalentSpellingsDeduplicateAcrossSubmissions() {
+        String viaPurl = """
+                {"bomFormat":"CycloneDX","components":[
+                  {"name":"log4j-core","version":"2.14.0",
+                   "purl":"pkg:maven/org.apache.logging.log4j/log4j-core@2.14.0"}]}
+                """;
+        String viaSlashName = """
+                {"bomFormat":"CycloneDX","components":[
+                  {"name":"org.apache.logging.log4j/log4j-core","version":"2.14.0",
+                   "ecosystems":["maven"]}]}
+                """;
+        String viaUpperPurl = """
+                {"bomFormat":"CycloneDX","components":[
+                  {"name":"whatever","version":"2.14.0",
+                   "purl":"pkg:maven/Org.Apache.Logging.Log4J/Log4J-Core@2.14.0"}]}
+                """;
+        IngestionResponse r1 = service.ingest("t-equiv-dedup", viaPurl);
+        IngestionResponse r2 = service.ingest("t-equiv-dedup", viaSlashName);
+        IngestionResponse r3 = service.ingest("t-equiv-dedup", viaUpperPurl);
+        log.info("输入摘要: 同一 maven 库三种等价写法先后提交 | accepted={}/{}/{} duplicate={}/{}/{}",
+                r1.acceptedCount(), r2.acceptedCount(), r3.acceptedCount(),
+                r1.duplicateCount(), r2.duplicateCount(), r3.duplicateCount());
+        assertEquals(1, r1.acceptedCount());
+        assertEquals(0, r2.acceptedCount());
+        assertEquals(1, r2.duplicateCount());
+        assertEquals(0, r3.acceptedCount());
+        assertEquals(1, r3.duplicateCount());
+        var stored = repository.findByTarget("t-equiv-dedup");
+        assertEquals(1, stored.size());
+        assertEquals("maven::org.apache.logging.log4j:log4j-core@2.14.0", stored.get(0).key());
+        log.info("判定依据: 三种写法归一到同一稳定身份 {}", stored.get(0).key());
+    }
+
+    @Test
+    @DisplayName("不同生态不串号：maven 斜杠名字与 npm 同名包是两条不同记录")
+    void crossEcosystemSpellingsDoNotCollide() {
+        String doc = """
+                {"bomFormat":"CycloneDX","components":[
+                  {"name":"lodash/lodash","version":"4.17.20","ecosystems":["maven"]},
+                  {"name":"lodash","version":"4.17.20","ecosystems":["npm"]}
+                ]}
+                """;
+        IngestionResponse r = service.ingest("t-no-cross", doc);
+        var stored = repository.findByTarget("t-no-cross");
+        log.info("输入摘要: maven 的 lodash/lodash 与 npm 的 lodash 同名 | accepted={} | 存储键={}",
+                r.acceptedCount(), stored.stream().map(c -> c.key()).toList());
+        assertEquals(2, r.acceptedCount());
+        assertEquals(2, stored.size());
+        assertTrue(stored.stream().anyMatch(c -> c.key().equals("maven::lodash:lodash@4.17.20")));
+        assertTrue(stored.stream().anyMatch(c -> c.key().equals("npm::lodash@4.17.20")));
+    }
+
+    @Test
     @DisplayName("大清单重复提交：500 个组件两次提交，第二次全部幂等命中，存储条数不变")
     void largeManifestResubmissionIsIdempotent() {
         StringBuilder sb = new StringBuilder("{\"bomFormat\":\"CycloneDX\",\"components\":[");

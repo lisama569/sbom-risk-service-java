@@ -3,6 +3,7 @@ package com.github.lisama569.sbomriskservicejava.service;
 import com.github.lisama569.sbomriskservicejava.model.Component;
 import com.github.lisama569.sbomriskservicejava.model.ComponentRisk;
 import com.github.lisama569.sbomriskservicejava.model.PolicyRule;
+import com.github.lisama569.sbomriskservicejava.model.RejectedItem;
 import com.github.lisama569.sbomriskservicejava.model.RiskLevel;
 import com.github.lisama569.sbomriskservicejava.model.RiskReport;
 import com.github.lisama569.sbomriskservicejava.model.VulnerabilityRule;
@@ -25,8 +26,11 @@ import java.util.List;
  *   <li>策略（拒绝名单）命中 → {@link RiskLevel#DENIED}；</li>
  *   <li>漏洞范围命中 → {@link RiskLevel#VULNERABLE}；</li>
  *   <li>无任何规则匹配 → {@link RiskLevel#CLEAN}；</li>
- *   <li>版本不可解析、生态无法识别（规则库未覆盖）、规则范围非法等无法判定的情况
- *       → {@link RiskLevel#UNKNOWN}，绝不能默认安全。</li>
+ *   <li>版本不可解析、生态无法识别（规则库未覆盖）、坐标解析不出可靠身份、
+ *       规则范围非法等无法判定的情况 → {@link RiskLevel#UNKNOWN}，绝不能默认安全；</li>
+ *   <li>摄入时被拒的无法判定条目（不支持的坐标类型、缺名/缺版本、版本非法等）
+ *       以单独的 {@link RiskLevel#UNKNOWN} 结论出现在报告中，
+ *       并把总体结论至少抬到 UNKNOWN。</li>
  * </ol>
  * 报告携带规则版本；规则不变时，同一组件集合的报告逐条可复现。
  */
@@ -55,17 +59,32 @@ public class RiskEvaluationService {
             throw new IllegalArgumentException("targetId must not be blank");
         }
         List<Component> components = componentRepository.findByTarget(targetId);
-        if (components.isEmpty()) {
+        List<RejectedItem> unjudgeable = componentRepository.findUnjudgeableByTarget(targetId);
+        if (components.isEmpty() && unjudgeable.isEmpty()) {
             throw new TargetNotFoundException(targetId);
         }
         String rulesVersion = ruleRepository.version();
-        log.info("Risk evaluation start | targetId={} | components={} | rulesVersion={}",
-                targetId, components.size(), rulesVersion);
+        log.info("Risk evaluation start | targetId={} | components={} | unjudgeable={} | rulesVersion={}",
+                targetId, components.size(), unjudgeable.size(), rulesVersion);
 
-        List<ComponentRisk> risks = new ArrayList<>(components.size());
+        List<ComponentRisk> risks = new ArrayList<>(components.size() + unjudgeable.size());
         RiskLevel overall = RiskLevel.CLEAN;
         for (Component c : components) {
             ComponentRisk risk = evaluateOne(c);
+            risks.add(risk);
+            if (risk.level().ordinal() > overall.ordinal()) {
+                overall = risk.level();
+            }
+            log.info("Risk verdict | targetId={} | component={} | level={} | reasons={}",
+                    targetId, risk.component(), risk.level(), risk.reasons());
+        }
+        // 摄入时被拒的无法判定条目：以单独的 UNKNOWN 结论出现在报告中，
+        // 并把总体结论至少抬到 UNKNOWN——绝不能因为条目被拒就当它不存在
+        for (RejectedItem item : unjudgeable) {
+            ComponentRisk risk = new ComponentRisk(
+                    "unresolved::" + item.reason() + "#" + item.index(),
+                    RiskLevel.UNKNOWN,
+                    List.of("UNKNOWN:ingest-rejected:" + item.reason() + ":" + item.detail()));
             risks.add(risk);
             if (risk.level().ordinal() > overall.ordinal()) {
                 overall = risk.level();
@@ -93,9 +112,15 @@ public class RiskEvaluationService {
 
         List<String> reasons = new ArrayList<>();
 
-        // 0. 生态不可识别 → 无法确认规则覆盖，先记无法判定（规则仍照常匹配，
-        //    命中的 DENIED/VULNERABLE 更严重等级仍然优先）
+        // 0. 无法判定的两种前置情形（规则仍照常匹配，命中的 DENIED/VULNERABLE 更严重等级仍优先）：
+        //    a) 身份不可靠：清单携带了 purl 但解析不出可靠身份——即使 ecosystems 标了
+        //       maven/npm，也不能凭名字字段放行成安全；
+        //    b) 生态不可识别：规则库未覆盖，无法确认是否命中规则。
         boolean unjudgeable = false;
+        if (!component.identityReliable()) {
+            unjudgeable = true;
+            reasons.add("UNKNOWN:unreliable-identity:malformed-purl");
+        }
         String ecosystem = component.ecosystem() == null
                 ? "unknown" : component.ecosystem().trim().toLowerCase();
         if (!JUDGEABLE_ECOSYSTEMS.contains(ecosystem)) {

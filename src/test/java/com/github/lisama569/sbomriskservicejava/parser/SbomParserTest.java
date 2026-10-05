@@ -8,6 +8,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -125,6 +126,61 @@ class SbomParserTest {
         var b = cdxParser.parse(viaName).components().get(0);
         log.info("输入摘要: npm 作用域两种写法 | purl 键={} | 名字键={}", a.key(), b.key());
         assertEquals(b.key(), a.key());
+    }
+
+    @Test
+    @DisplayName("maven 斜杠名字归一：组名/构件名 斜杠写法与 purl 坐标落到同一身份")
+    void mavenSlashNameNormalizesToPurlIdentity() {
+        String viaPurl = """
+                {"bomFormat":"CycloneDX","components":[
+                  {"name":"log4j-core","version":"2.14.0",
+                   "purl":"pkg:maven/org.apache.logging.log4j/log4j-core@2.14.0"}]}
+                """;
+        String viaSlashName = """
+                {"bomFormat":"CycloneDX","components":[
+                  {"name":"org.apache.logging.log4j/log4j-core","version":"2.14.0",
+                   "ecosystems":["maven"]}]}
+                """;
+        var a = cdxParser.parse(viaPurl).components().get(0);
+        var b = cdxParser.parse(viaSlashName).components().get(0);
+        log.info("输入摘要: purl 写法 vs 斜杠名字写法 | purl 键={} | 斜杠名字键={}", a.key(), b.key());
+        assertEquals(a.key(), b.key());
+        assertEquals("org.apache.logging.log4j:log4j-core", b.name());
+    }
+
+    @Test
+    @DisplayName("字段法名字大小写归一：maven/npm 名字字段仅大小写不同也落到同一身份")
+    void fieldNamesAreCaseNormalizedPerEcosystem() {
+        String doc = """
+                {"bomFormat":"CycloneDX","components":[
+                  {"name":"Org.Apache.Logging.Log4J:Log4J-Core","version":"2.14.0","ecosystems":["maven"]},
+                  {"name":"@Angular/Core","version":"15.0.0","ecosystems":["npm"]}
+                ]}
+                """;
+        ParseResult r = cdxParser.parse(doc);
+        log.info("输入摘要: 大小写混杂的名字字段 | 归一键={}",
+                r.components().stream().map(c -> c.key()).toList());
+        assertEquals("maven::org.apache.logging.log4j:log4j-core@2.14.0",
+                r.components().get(0).key());
+        assertEquals("npm::@angular/core@15.0.0", r.components().get(1).key());
+    }
+
+    @Test
+    @DisplayName("畸形 purl 但标了 maven：身份标记为不可靠（判定层归 UNKNOWN，不放行成安全）")
+    void malformedPurlWithMavenEcosystemIsMarkedUnreliable() {
+        String doc = """
+                {"bomFormat":"CycloneDX","components":[
+                  {"name":"org.example:some-lib","version":"1.0.0",
+                   "ecosystems":["maven"],"purl":"pkg:maven/only-one-segment@1.0.0"}]}
+                """;
+        ParseResult r = cdxParser.parse(doc);
+        assertEquals(1, r.components().size());
+        var c = r.components().get(0);
+        log.info("输入摘要: 畸形 purl + ecosystems=[maven] | 归一键={} | 身份可靠={}",
+                c.key(), c.identityReliable());
+        // 仍按字段法入库（保留清单事实），但身份不可靠，判定层绝不放行成安全
+        assertEquals("maven", c.ecosystem());
+        assertFalse(c.identityReliable());
     }
 
     @Test
